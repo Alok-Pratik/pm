@@ -168,7 +168,7 @@ export const KanbanBoard = ({ onLogout, onUnauthorized }: KanbanBoardProps) => {
               <section className="board-lane flex min-w-max gap-6">
                 {board.columns.map((column) => (
                   <KanbanColumn
-                    key={`${column.id}-${column.title}`}
+                    key={column.id}
                     column={column}
                     cards={column.cardIds.map((cardId) => board.cards[cardId])}
                     onRename={handleRenameColumn}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
@@ -25,6 +25,10 @@ export const KanbanColumn = ({
 }: KanbanColumnProps) => {
   const [title, setTitle] = useState(column.title);
   const { setNodeRef, isOver } = useDroppable({ id: column.id });
+
+  useEffect(() => {
+    setTitle(column.title);
+  }, [column.title]);
 
   return (
     <section

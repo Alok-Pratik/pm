@@ -38,6 +38,7 @@ export const ChatSidebar = ({ onBoardUpdate, onUnauthorized }: ChatSidebarProps)
       if (reason instanceof ApiError && reason.status === 401) {
         onUnauthorized?.();
       }
+      setMessages((current) => current.slice(0, -1));
       setError(reason instanceof Error ? reason.message : "The chat request failed.");
     } finally {
       setIsSending(false);

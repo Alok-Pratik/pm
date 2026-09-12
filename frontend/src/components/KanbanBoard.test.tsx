@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { KanbanBoard } from "@/components/KanbanBoard";
-import { initialData } from "@/lib/kanban";
+import { initialData } from "@/test/fixtures";
 
 const { api } = vi.hoisted(() => ({
   api: {

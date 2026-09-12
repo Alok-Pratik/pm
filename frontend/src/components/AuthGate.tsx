@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import { KanbanBoard } from "@/components/KanbanBoard";
 
 type Credentials = {
@@ -46,12 +46,14 @@ export const AuthGate = () => {
     setIsAuthenticated(false);
   };
 
+  const handleUnauthorized = useCallback(() => setIsAuthenticated(false), []);
+
   if (isAuthenticated === null) {
     return <main className="grid min-h-screen place-items-center">Loading…</main>;
   }
 
   if (isAuthenticated) {
-    return <KanbanBoard onLogout={handleLogout} onUnauthorized={() => setIsAuthenticated(false)} />;
+    return <KanbanBoard onLogout={handleLogout} onUnauthorized={handleUnauthorized} />;
   }
 
   return (

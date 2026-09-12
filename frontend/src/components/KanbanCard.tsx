@@ -22,6 +22,18 @@ export const KanbanCard = ({ card, onDelete, onEdit }: KanbanCardProps) => {
     transition,
   };
 
+  const openEdit = () => {
+    setTitle(card.title);
+    setDetails(card.details);
+    setIsEditing(true);
+  };
+
+  const cancelEdit = () => {
+    setTitle(card.title);
+    setDetails(card.details);
+    setIsEditing(false);
+  };
+
   return (
     <article
       ref={setNodeRef}
@@ -46,7 +58,7 @@ export const KanbanCard = ({ card, onDelete, onEdit }: KanbanCardProps) => {
           <textarea aria-label="Card details" value={details} onChange={(event) => setDetails(event.target.value)} rows={3} className="w-full rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm" />
           <div className="flex gap-2">
             <button type="submit" className="rounded-full bg-[var(--secondary-purple)] px-3 py-1 text-xs font-semibold text-white">Save</button>
-            <button type="button" onClick={() => setIsEditing(false)} className="rounded-full border border-[var(--stroke)] px-3 py-1 text-xs font-semibold">Cancel</button>
+            <button type="button" onClick={cancelEdit} className="rounded-full border border-[var(--stroke)] px-3 py-1 text-xs font-semibold">Cancel</button>
           </div>
         </form>
       ) : (
@@ -56,7 +68,7 @@ export const KanbanCard = ({ card, onDelete, onEdit }: KanbanCardProps) => {
             <p className="mt-2 text-sm leading-6 text-[var(--gray-text)]">{card.details}</p>
           </div>
           <div className="flex shrink-0 gap-1" onPointerDown={(event) => event.stopPropagation()}>
-            <button type="button" onClick={() => setIsEditing(true)} className="rounded-full border border-transparent px-2 py-1 text-xs font-semibold text-[var(--gray-text)]" aria-label={`Edit ${card.title}`}>Edit</button>
+            <button type="button" onClick={openEdit} className="rounded-full border border-transparent px-2 py-1 text-xs font-semibold text-[var(--gray-text)]" aria-label={`Edit ${card.title}`}>Edit</button>
             <button type="button" onClick={() => onDelete(card.id)} className="rounded-full border border-transparent px-2 py-1 text-xs font-semibold text-[var(--gray-text)]" aria-label={`Delete ${card.title}`}>Remove</button>
           </div>
         </div>
