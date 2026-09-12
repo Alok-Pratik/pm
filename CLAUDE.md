@@ -88,5 +88,3 @@ Multi-stage: Node builds the frontend static export, then Python/uv installs the
 - Five fixed columns — count is immutable, only titles change.
 - Add backend tests in `backend/tests/` for every endpoint or persistence behavior.
 - Update frontend tests whenever UI behavior changes.
-
-@docs/AGENTS.md
