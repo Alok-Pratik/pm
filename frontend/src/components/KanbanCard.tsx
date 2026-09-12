@@ -68,8 +68,33 @@ export const KanbanCard = ({ card, onDelete, onEdit }: KanbanCardProps) => {
             <p className="mt-2 text-sm leading-6 text-[var(--gray-text)]">{card.details}</p>
           </div>
           <div className="flex shrink-0 gap-1" onPointerDown={(event) => event.stopPropagation()}>
-            <button type="button" onClick={openEdit} className="rounded-full border border-transparent px-2 py-1 text-xs font-semibold text-[var(--gray-text)]" aria-label={`Edit ${card.title}`}>Edit</button>
-            <button type="button" onClick={() => onDelete(card.id)} className="rounded-full border border-transparent px-2 py-1 text-xs font-semibold text-[var(--gray-text)]" aria-label={`Delete ${card.title}`}>Remove</button>
+            <button
+              type="button"
+              onClick={openEdit}
+              title="Edit"
+              className="rounded-full p-1.5 text-[var(--gray-text)] transition hover:bg-[var(--surface)] hover:text-[var(--primary-blue)]"
+              aria-label={`Edit ${card.title}`}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              onClick={() => onDelete(card.id)}
+              title="Delete"
+              className="rounded-full p-1.5 text-[var(--gray-text)] transition hover:bg-red-50 hover:text-red-600"
+              aria-label={`Delete ${card.title}`}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true">
+                <path d="M3 6h18" />
+                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6" />
+                <path d="M14 11v6" />
+              </svg>
+            </button>
           </div>
         </div>
       )}
