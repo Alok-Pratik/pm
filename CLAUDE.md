@@ -50,13 +50,13 @@ The Next.js app is statically exported (`next build` → `out/`) and FastAPI mou
 
 ### Backend (`backend/app/`)
 
-- `main.py` — FastAPI app, all routes: auth (`/login`, `/logout`, `/me`), board (`/board`, mutations), chat (`/chat`, `/chat/history`)
+- `main.py` — FastAPI app, all routes under `/api/`: auth (`/api/auth/session`, `/api/auth/login`, `/api/auth/logout`), board (`/api/board`, `/api/columns/{id}`, `/api/cards`, `/api/cards/{id}`, `/api/cards/{id}/move`), chat (`/api/chat`, `/api/chat/history`)
 - `database.py` — SQLite schema creation, seed data, all read/write helpers
-- `ai.py` — structured AI response: builds prompt with full board JSON + bounded history (20 messages), validates and applies board operations atomically
+- `ai.py` — structured AI response: builds prompt with full board JSON + bounded history (last 20 messages), validates and applies up to 20 board operations atomically
 - `openrouter.py` — HTTP client for OpenRouter
 - `config.py` — environment config (`OPENROUTER_API_KEY`)
 
-Auth uses signed HTTP-only session cookies (`itsdangerous`). Every board and chat endpoint verifies the session before touching the database.
+Auth uses Starlette `SessionMiddleware` (itsdangerous-signed cookies). Every board and chat endpoint calls `signed_in_user()` to verify the session before touching the database. `SESSION_SECRET` is optional; if unset, a random per-process key is used, which invalidates existing sessions on restart.
 
 ### Frontend (`frontend/src/`)
 
