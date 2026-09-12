@@ -8,7 +8,7 @@ from app.openrouter import OpenRouterError, OpenRouterService
 
 
 @pytest.mark.anyio
-async def test_complete_builds_openrouter_request() -> None:
+async def test_complete_messages_builds_openrouter_request() -> None:
     requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -20,7 +20,7 @@ async def test_complete_builds_openrouter_request() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    assert await service.complete("2+2") == "4"
+    assert await service.complete_messages([{"role": "user", "content": "2+2"}]) == "4"
     assert requests[0].url == "https://openrouter.ai/api/v1/chat/completions"
     assert requests[0].headers["authorization"] == "Bearer test-key"
     assert json.loads(requests[0].content) == {
@@ -47,7 +47,7 @@ async def test_upstream_failure_is_safe_error() -> None:
     )
 
     with pytest.raises(OpenRouterError, match="OpenRouter request failed"):
-        await service.complete("2+2")
+        await service.complete_messages([{"role": "user", "content": "2+2"}])
 
 
 @pytest.mark.anyio
@@ -61,4 +61,4 @@ async def test_malformed_response_is_safe_error() -> None:
     )
 
     with pytest.raises(OpenRouterError, match="invalid response"):
-        await service.complete("2+2")
+        await service.complete_messages([{"role": "user", "content": "2+2"}])

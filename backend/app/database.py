@@ -4,7 +4,14 @@ import sqlite3
 from pathlib import Path
 
 import bcrypt
-from fastapi import HTTPException
+
+
+class NotFoundError(LookupError):
+    """Raised when a referenced board, column, or card doesn't belong to the caller."""
+
+
+class ValidationError(ValueError):
+    """Raised when caller-supplied board content fails validation."""
 
 
 SEED_COLUMNS = [
@@ -139,6 +146,15 @@ def _drop_boards_one_per_user_constraint(connection: sqlite3.Connection) -> None
             connection.execute("PRAGMA foreign_keys = ON")
 
 
+def require_nonblank(value: str, field: str, *, max_len: int | None = None) -> str:
+    cleaned = value.strip()
+    if max_len is not None:
+        cleaned = cleaned[:max_len]
+    if not cleaned:
+        raise ValidationError(f"{field} is required")
+    return cleaned
+
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
@@ -188,9 +204,7 @@ def insert_board(connection: sqlite3.Connection, user_id: str, title: str, seed:
     if seed:
         for seed_card_id, seed_column_id, card_title, details in SEED_CARDS:
             column_id = column_ids[seed_column_id]
-            position = connection.execute(
-                "SELECT COUNT(*) FROM cards WHERE column_id = ?", (column_id,)
-            ).fetchone()[0]
+            position = next_position(connection, column_id)
             card_id = f"{board_id}-{seed_card_id}"
             connection.execute(
                 "INSERT INTO cards (id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
@@ -206,12 +220,27 @@ def boards_for_user(connection: sqlite3.Connection, user_id: str) -> list[dict]:
     return [{"id": row["id"], "title": row["title"]} for row in rows]
 
 
+def next_position(connection: sqlite3.Connection, column_id: str) -> int:
+    return connection.execute(
+        "SELECT COUNT(*) FROM cards WHERE column_id = ?", (column_id,)
+    ).fetchone()[0]
+
+
+def card_ids_in_column(connection: sqlite3.Connection, column_id: str) -> list[str]:
+    return [
+        row["id"]
+        for row in connection.execute(
+            "SELECT id FROM cards WHERE column_id = ? ORDER BY position", (column_id,)
+        )
+    ]
+
+
 def owned_board(connection: sqlite3.Connection, board_id: str, user_id: str) -> sqlite3.Row:
     board = connection.execute(
         "SELECT * FROM boards WHERE id = ? AND user_id = ?", (board_id, user_id)
     ).fetchone()
     if not board:
-        raise HTTPException(status_code=404, detail="Board not found")
+        raise NotFoundError("Board not found")
     return board
 
 
@@ -253,7 +282,7 @@ def owned_column(connection: sqlite3.Connection, column_id: str, board_id: str) 
         "SELECT * FROM columns WHERE id = ? AND board_id = ?", (column_id, board_id)
     ).fetchone()
     if not column:
-        raise HTTPException(status_code=404, detail="Column not found")
+        raise NotFoundError("Column not found")
     return column
 
 
@@ -264,7 +293,7 @@ def owned_card(connection: sqlite3.Connection, card_id: str, board_id: str) -> s
         (card_id, board_id),
     ).fetchone()
     if not card:
-        raise HTTPException(status_code=404, detail="Card not found")
+        raise NotFoundError("Card not found")
     return card
 
 
@@ -274,13 +303,14 @@ def rewrite_positions(connection: sqlite3.Connection, column_id: str, card_ids: 
         "SELECT COALESCE(MAX(position), 0) FROM cards WHERE column_id = ?", (column_id,)
     ).fetchone()[0]
     temporary_base = current_max + len(card_ids) + 1
-    for index, card_id in enumerate(card_ids):
-        connection.execute("UPDATE cards SET position = ? WHERE id = ?", (temporary_base + index, card_id))
-    for index, card_id in enumerate(card_ids):
-        connection.execute(
-            "UPDATE cards SET position = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (index, card_id),
-        )
+    connection.executemany(
+        "UPDATE cards SET position = ? WHERE id = ?",
+        [(temporary_base + index, card_id) for index, card_id in enumerate(card_ids)],
+    )
+    connection.executemany(
+        "UPDATE cards SET position = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [(index, card_id) for index, card_id in enumerate(card_ids)],
+    )
 
 
 def do_move_card(
@@ -289,23 +319,13 @@ def do_move_card(
     """Move card_id to column_id at position. Validates ownership, updates positions atomically."""
     card = owned_card(connection, card_id, board_id)
     owned_column(connection, column_id, board_id)
-    source_ids = [
-        row["id"]
-        for row in connection.execute(
-            "SELECT id FROM cards WHERE column_id = ? ORDER BY position", (card["column_id"],)
-        )
-    ]
+    source_ids = card_ids_in_column(connection, card["column_id"])
     if card["column_id"] == column_id:
         source_ids.remove(card_id)
         source_ids.insert(min(position, len(source_ids)), card_id)
         rewrite_positions(connection, column_id, source_ids)
     else:
-        target_ids = [
-            row["id"]
-            for row in connection.execute(
-                "SELECT id FROM cards WHERE column_id = ? ORDER BY position", (column_id,)
-            )
-        ]
+        target_ids = card_ids_in_column(connection, column_id)
         source_ids.remove(card_id)
         target_ids.insert(min(position, len(target_ids)), card_id)
         # Park the card outside the valid range so source compaction doesn't conflict.
@@ -336,48 +356,53 @@ def recent_chat_messages(
     return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
 
+def rename_column_op(connection: sqlite3.Connection, board_id: str, column_id: str, title: str) -> None:
+    title = require_nonblank(title, "Column title")
+    owned_column(connection, column_id, board_id)
+    connection.execute("UPDATE columns SET title = ? WHERE id = ?", (title, column_id))
+
+
+def create_card_op(
+    connection: sqlite3.Connection, board_id: str, column_id: str, title: str, details: str
+) -> str:
+    title = require_nonblank(title, "Card title")
+    owned_column(connection, column_id, board_id)
+    position = next_position(connection, column_id)
+    card_id = f"card-{secrets.token_hex(4)}"
+    connection.execute(
+        "INSERT INTO cards (id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
+        (card_id, column_id, title, details.strip(), position),
+    )
+    return card_id
+
+
+def edit_card_op(
+    connection: sqlite3.Connection, board_id: str, card_id: str, title: str | None, details: str | None
+) -> None:
+    card = owned_card(connection, card_id, board_id)
+    new_title = card["title"] if title is None else require_nonblank(title, "Card title")
+    new_details = card["details"] if details is None else details.strip()
+    connection.execute(
+        "UPDATE cards SET title = ?, details = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (new_title, new_details, card_id),
+    )
+
+
+def delete_card_op(connection: sqlite3.Connection, board_id: str, card_id: str) -> None:
+    card = owned_card(connection, card_id, board_id)
+    connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+    rewrite_positions(connection, card["column_id"], card_ids_in_column(connection, card["column_id"]))
+
+
 def apply_board_operations(connection: sqlite3.Connection, board_id: str, operations: list) -> None:
     for op in operations:
         if op.type == "rename_column":
-            title = op.title.strip()
-            if not title:
-                raise ValueError("rename_column: title cannot be empty")
-            owned_column(connection, op.column_id, board_id)
-            connection.execute(
-                "UPDATE columns SET title = ? WHERE id = ?", (title, op.column_id)
-            )
+            rename_column_op(connection, board_id, op.column_id, op.title)
         elif op.type == "create_card":
-            title = op.title.strip()
-            if not title:
-                raise ValueError("create_card: title cannot be empty")
-            owned_column(connection, op.column_id, board_id)
-            position = connection.execute(
-                "SELECT COUNT(*) FROM cards WHERE column_id = ?", (op.column_id,)
-            ).fetchone()[0]
-            card_id = f"card-ai-{os.urandom(8).hex()}"
-            connection.execute(
-                "INSERT INTO cards (id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
-                (card_id, op.column_id, title, (op.details or "").strip(), position),
-            )
+            create_card_op(connection, board_id, op.column_id, op.title, op.details)
         elif op.type == "edit_card":
-            card = owned_card(connection, op.card_id, board_id)
-            title = card["title"] if op.title is None else op.title.strip()
-            if not title:
-                raise ValueError("edit_card: title cannot be empty")
-            details = card["details"] if op.details is None else op.details.strip()
-            connection.execute(
-                "UPDATE cards SET title = ?, details = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (title, details, op.card_id),
-            )
+            edit_card_op(connection, board_id, op.card_id, op.title, op.details)
         elif op.type == "delete_card":
-            card = owned_card(connection, op.card_id, board_id)
-            connection.execute("DELETE FROM cards WHERE id = ?", (op.card_id,))
-            remaining = [
-                row["id"]
-                for row in connection.execute(
-                    "SELECT id FROM cards WHERE column_id = ? ORDER BY position", (card["column_id"],)
-                )
-            ]
-            rewrite_positions(connection, card["column_id"], remaining)
+            delete_card_op(connection, board_id, op.card_id)
         elif op.type == "move_card":
             do_move_card(connection, op.card_id, op.column_id, op.position, board_id)

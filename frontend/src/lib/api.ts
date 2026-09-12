@@ -22,6 +22,16 @@ export class ApiError extends Error {
   }
 }
 
+// Calls onUnauthorized when reason is a 401 from the API; otherwise a no-op.
+export const notifyIfUnauthorized = (reason: unknown, onUnauthorized?: () => void): void => {
+  if (reason instanceof ApiError && reason.status === 401) {
+    onUnauthorized?.();
+  }
+};
+
+export const describeApiError = (reason: unknown, fallback: string): string =>
+  reason instanceof Error ? reason.message : fallback;
+
 const parseJsonOrThrow = async <T>(response: Response, fallbackMessage: string): Promise<T> => {
   if (!response.ok) {
     const data = (await response.json().catch(() => null)) as { detail?: string } | null;

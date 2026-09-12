@@ -14,9 +14,6 @@ class OpenRouterService:
         self.settings = settings
         self.transport = transport
 
-    async def complete(self, prompt: str) -> str:
-        return await self.complete_messages([{"role": "user", "content": prompt}])
-
     async def complete_messages(self, messages: list[dict[str, str]]) -> str:
         payload = {
             "model": self.settings.model,

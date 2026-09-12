@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import type { BoardData } from "@/lib/kanban";
-import { ApiError, getChatHistory, sendChat, type ChatMessage } from "@/lib/api";
+import { describeApiError, getChatHistory, notifyIfUnauthorized, sendChat, type ChatMessage } from "@/lib/api";
 
 type ChatSidebarProps = {
   boardId: string;
@@ -19,7 +19,7 @@ export const ChatSidebar = ({ boardId, onBoardUpdate, onUnauthorized }: ChatSide
   useEffect(() => {
     setMessages([]);
     getChatHistory(boardId).then(setMessages).catch((reason) => {
-      if (reason instanceof ApiError && reason.status === 401) onUnauthorized?.();
+      notifyIfUnauthorized(reason, onUnauthorized);
     });
   }, [boardId, onUnauthorized]);
 
@@ -37,11 +37,9 @@ export const ChatSidebar = ({ boardId, onBoardUpdate, onUnauthorized }: ChatSide
       onBoardUpdate(response.board);
       setMessages((current) => [...current, { role: "assistant", content: response.message }]);
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) {
-        onUnauthorized?.();
-      }
+      notifyIfUnauthorized(reason, onUnauthorized);
       setMessages((current) => current.slice(0, -1));
-      setError(reason instanceof Error ? reason.message : "The chat request failed.");
+      setError(describeApiError(reason, "The chat request failed."));
     } finally {
       setIsSending(false);
     }

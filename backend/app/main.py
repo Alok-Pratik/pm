@@ -3,32 +3,38 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.ai import build_prompt, parse_ai_response
 from app.config import OpenRouterSettings
 from app.database import (
+    NotFoundError,
+    ValidationError,
     apply_board_operations,
     boards_for_user,
     connect,
+    create_card_op,
     create_user,
+    delete_card_op,
     do_move_card,
+    edit_card_op,
     get_board,
     get_user_by_id,
     get_user_by_username,
     initialize,
     insert_board,
     owned_board,
-    owned_card,
-    owned_column,
     recent_chat_messages,
     remove_board,
-    rewrite_positions,
+    rename_column_op,
+    require_nonblank,
     save_chat_message,
     update_board_title,
     verify_password,
@@ -63,6 +69,16 @@ _session_secret = os.environ.get("SESSION_SECRET") or secrets.token_hex(32)
 
 app.add_middleware(SessionMiddleware, secret_key=_session_secret)
 frontend_dir = Path(__file__).parent / "static"
+
+
+@app.exception_handler(NotFoundError)
+async def handle_not_found(_request: Request, error: NotFoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(error)})
+
+
+@app.exception_handler(ValidationError)
+async def handle_validation_error(_request: Request, error: ValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(error)})
 
 
 class RegisterRequest(BaseModel):
@@ -119,6 +135,13 @@ def signed_in_user(request: Request) -> str:
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
     return user_id
+
+
+def require_board(connection: sqlite3.Connection, board_id: str, request: Request) -> tuple[str, sqlite3.Row]:
+    """Verify the caller is signed in and owns board_id; raises 401/404 otherwise."""
+    user = signed_in_user(request)
+    board = owned_board(connection, board_id, user)
+    return user, board
 
 
 @app.get("/health")
@@ -194,97 +217,57 @@ def create_board(payload: BoardCreate, request: Request) -> dict:
 
 @app.get("/api/boards/{board_id}")
 def read_board(board_id: str, request: Request) -> dict:
-    user = signed_in_user(request)
     with connect() as connection:
-        board = owned_board(connection, board_id, user)
+        _, board = require_board(connection, board_id, request)
         return {"id": board["id"], "title": board["title"], **get_board(connection, board_id)}
 
 
 @app.patch("/api/boards/{board_id}")
 def rename_board(board_id: str, payload: BoardRename, request: Request) -> dict:
-    title = payload.title.strip()[:_MAX_BOARD_TITLE_LEN]
-    if not title:
-        raise HTTPException(status_code=422, detail="Board title is required")
-    user = signed_in_user(request)
+    title = require_nonblank(payload.title, "Board title", max_len=_MAX_BOARD_TITLE_LEN)
     with write_connect() as connection:
-        owned_board(connection, board_id, user)
+        require_board(connection, board_id, request)
         update_board_title(connection, board_id, title)
         return {"id": board_id, "title": title, **get_board(connection, board_id)}
 
 
 @app.delete("/api/boards/{board_id}")
 def delete_board(board_id: str, request: Request) -> dict:
-    user = signed_in_user(request)
     with write_connect() as connection:
-        owned_board(connection, board_id, user)
+        user, _ = require_board(connection, board_id, request)
         remove_board(connection, board_id)
         return {"boards": boards_for_user(connection, user)}
 
 
 @app.put("/api/boards/{board_id}/columns/{column_id}")
 def rename_column(board_id: str, column_id: str, update: ColumnUpdate, request: Request) -> dict:
-    title = update.title.strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="Column title is required")
-    user = signed_in_user(request)
     with write_connect() as connection:
-        owned_board(connection, board_id, user)
-        owned_column(connection, column_id, board_id)
-        connection.execute("UPDATE columns SET title = ? WHERE id = ?", (title, column_id))
+        require_board(connection, board_id, request)
+        rename_column_op(connection, board_id, column_id, update.title)
         return get_board(connection, board_id)
 
 
 @app.post("/api/boards/{board_id}/cards")
 def create_card(board_id: str, card: CardCreate, request: Request) -> dict:
-    title = card.title.strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="Card title is required")
-    user = signed_in_user(request)
     with write_connect() as connection:
-        owned_board(connection, board_id, user)
-        owned_column(connection, card.column_id, board_id)
-        position = connection.execute(
-            "SELECT COUNT(*) FROM cards WHERE column_id = ?", (card.column_id,)
-        ).fetchone()[0]
-        card_id = f"card-{secrets.token_hex(4)}"
-        connection.execute(
-            "INSERT INTO cards (id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
-            (card_id, card.column_id, title, card.details.strip(), position),
-        )
+        require_board(connection, board_id, request)
+        create_card_op(connection, board_id, card.column_id, card.title, card.details)
         return get_board(connection, board_id)
 
 
 @app.patch("/api/boards/{board_id}/cards/{card_id}")
 def edit_card(board_id: str, card_id: str, update: CardUpdate, request: Request) -> dict:
-    user = signed_in_user(request)
     with write_connect() as connection:
-        owned_board(connection, board_id, user)
-        card = owned_card(connection, card_id, board_id)
-        title = card["title"] if update.title is None else update.title.strip()
-        if not title:
-            raise HTTPException(status_code=422, detail="Card title is required")
-        details = card["details"] if update.details is None else update.details.strip()
-        connection.execute(
-            "UPDATE cards SET title = ?, details = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (title, details, card_id),
-        )
+        require_board(connection, board_id, request)
+        edit_card_op(connection, board_id, card_id, update.title, update.details)
         return get_board(connection, board_id)
 
 
 @app.delete("/api/boards/{board_id}/cards/{card_id}")
 def delete_card(board_id: str, card_id: str, request: Request) -> dict:
-    user = signed_in_user(request)
     with write_connect() as connection:
-        owned_board(connection, board_id, user)
-        card = owned_card(connection, card_id, board_id)
-        connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-        remaining = [
-            row["id"]
-            for row in connection.execute(
-                "SELECT id FROM cards WHERE column_id = ? ORDER BY position", (card["column_id"],)
-            )
-        ]
-        rewrite_positions(connection, card["column_id"], remaining)
+        require_board(connection, board_id, request)
+        delete_card_op(connection, board_id, card_id)
         return get_board(connection, board_id)
 
 
@@ -292,9 +275,8 @@ def delete_card(board_id: str, card_id: str, request: Request) -> dict:
 def move_card(board_id: str, card_id: str, move: CardMove, request: Request) -> dict:
     if move.position < 0:
         raise HTTPException(status_code=422, detail="Position must be zero or greater")
-    user = signed_in_user(request)
     with write_connect() as connection:
-        owned_board(connection, board_id, user)
+        require_board(connection, board_id, request)
         do_move_card(connection, card_id, move.column_id, move.position, board_id)
         return get_board(connection, board_id)
 
@@ -309,14 +291,13 @@ async def chat(board_id: str, chat_request: ChatRequest, request: Request) -> di
             status_code=422,
             detail=f"Message must be {_MAX_CHAT_MESSAGE_LEN} characters or fewer",
         )
-    user = signed_in_user(request)
 
-    def load_context() -> tuple[dict, list[dict]]:
+    def load_context() -> tuple[str, dict, list[dict]]:
         with connect() as connection:
-            owned_board(connection, board_id, user)
-            return get_board(connection, board_id), recent_chat_messages(connection, user, board_id)
+            user, _ = require_board(connection, board_id, request)
+            return user, get_board(connection, board_id), recent_chat_messages(connection, user, board_id)
 
-    board, history = await asyncio.to_thread(load_context)
+    user, board, history = await asyncio.to_thread(load_context)
 
     try:
         content = await openrouter_service().complete_messages(build_prompt(board, history, message))
@@ -328,13 +309,12 @@ async def chat(board_id: str, chat_request: ChatRequest, request: Request) -> di
 
     def apply_changes() -> dict:
         with write_connect() as connection:
-            owned_board(connection, board_id, user)
+            require_board(connection, board_id, request)
             save_chat_message(connection, user, board_id, "user", message)
             try:
                 apply_board_operations(connection, board_id, response.operations)
-            except (HTTPException, ValueError) as error:
-                detail = error.detail if isinstance(error, HTTPException) else str(error)
-                raise HTTPException(status_code=422, detail=detail) from error
+            except (NotFoundError, ValueError) as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
             save_chat_message(connection, user, board_id, "assistant", response.message)
             return get_board(connection, board_id)
 
@@ -345,9 +325,8 @@ async def chat(board_id: str, chat_request: ChatRequest, request: Request) -> di
 
 @app.get("/api/boards/{board_id}/chat/history")
 def chat_history(board_id: str, request: Request) -> dict:
-    user = signed_in_user(request)
     with connect() as connection:
-        owned_board(connection, board_id, user)
+        user, _ = require_board(connection, board_id, request)
         return {"messages": recent_chat_messages(connection, user, board_id)}
 
 

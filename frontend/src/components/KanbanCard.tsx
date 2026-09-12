@@ -22,15 +22,18 @@ export const KanbanCard = ({ card, onDelete, onEdit }: KanbanCardProps) => {
     transition,
   };
 
-  const openEdit = () => {
+  const resetFields = () => {
     setTitle(card.title);
     setDetails(card.details);
+  };
+
+  const openEdit = () => {
+    resetFields();
     setIsEditing(true);
   };
 
   const cancelEdit = () => {
-    setTitle(card.title);
-    setDetails(card.details);
+    resetFields();
     setIsEditing(false);
   };
 

@@ -2,13 +2,31 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { BoardSwitcher } from "@/components/BoardSwitcher";
+import { FullPageStatus } from "@/components/FullPageStatus";
 import { KanbanBoard } from "@/components/KanbanBoard";
-import { ApiError, createBoard, deleteBoard, listBoards, renameBoard } from "@/lib/api";
+import { ApiError, createBoard, deleteBoard, describeApiError, listBoards, renameBoard } from "@/lib/api";
 import type { BoardSummary } from "@/lib/kanban";
 
 type DashboardProps = {
   onLogout: () => void;
   onUnauthorized: () => void;
+};
+
+type SelectionOptions = { preferredId?: string; autoSelectOnlyBoard?: boolean };
+
+const pickSelectedBoardId = (
+  list: BoardSummary[],
+  current: string | null,
+  options?: SelectionOptions
+): string | null => {
+  if (options?.preferredId && list.some((board) => board.id === options.preferredId)) {
+    return options.preferredId;
+  }
+  if (current && list.some((board) => board.id === current)) return current;
+  // Land straight on the board when there is only one — matches the
+  // original single-board experience for a freshly registered user.
+  if (options?.autoSelectOnlyBoard && list.length === 1) return list[0].id;
+  return null;
 };
 
 export const Dashboard = ({ onLogout, onUnauthorized }: DashboardProps) => {
@@ -22,35 +40,29 @@ export const Dashboard = ({ onLogout, onUnauthorized }: DashboardProps) => {
         onUnauthorized();
         return;
       }
-      setError(reason instanceof Error ? reason.message : fallback);
+      setError(describeApiError(reason, fallback));
     },
     [onUnauthorized]
   );
 
-  const refreshBoards = useCallback(async (preferredId?: string) => {
-    try {
-      const list = await listBoards();
-      setBoards(list);
-      setSelectedBoardId((current) => {
-        if (preferredId && list.some((board) => board.id === preferredId)) return preferredId;
-        if (current && list.some((board) => board.id === current)) return current;
-        return null;
-      });
-    } catch (reason) {
-      handleFailure(reason, "Could not load your boards.");
-    }
-  }, [handleFailure]);
+  const refreshBoards = useCallback(
+    async (options?: SelectionOptions) => {
+      try {
+        const list = await listBoards();
+        setBoards(list);
+        setSelectedBoardId((current) => pickSelectedBoardId(list, current, options));
+      } catch (reason) {
+        handleFailure(reason, "Could not load your boards.");
+      }
+    },
+    [handleFailure]
+  );
 
   useEffect(() => {
     listBoards()
       .then((list) => {
         setBoards(list);
-        setSelectedBoardId((current) => {
-          if (current && list.some((board) => board.id === current)) return current;
-          // Land straight on the board when there is only one — matches the
-          // original single-board experience for a freshly registered user.
-          return list.length === 1 ? list[0].id : null;
-        });
+        setSelectedBoardId((current) => pickSelectedBoardId(list, current, { autoSelectOnlyBoard: true }));
       })
       .catch((reason) => handleFailure(reason, "Could not load your boards."));
   }, [handleFailure]);
@@ -59,7 +71,7 @@ export const Dashboard = ({ onLogout, onUnauthorized }: DashboardProps) => {
     setError("");
     try {
       const created = await createBoard(title);
-      await refreshBoards(created.id);
+      await refreshBoards({ preferredId: created.id });
     } catch (reason) {
       handleFailure(reason, "Could not create the board.");
     }
@@ -89,7 +101,7 @@ export const Dashboard = ({ onLogout, onUnauthorized }: DashboardProps) => {
   };
 
   if (boards === null) {
-    return <main className="grid min-h-screen place-items-center p-6">{error ? <p role="alert">{error}</p> : <p>Loading your boards...</p>}</main>;
+    return <FullPageStatus loadingText="Loading your boards..." error={error} />;
   }
 
   if (selectedBoardId) {

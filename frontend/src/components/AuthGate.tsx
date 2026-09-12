@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Dashboard } from "@/components/Dashboard";
+import { FullPageStatus } from "@/components/FullPageStatus";
 import { getSession, login, logout, register } from "@/lib/api";
 
 type Credentials = {
@@ -48,7 +49,7 @@ export const AuthGate = () => {
   const handleUnauthorized = useCallback(() => setIsAuthenticated(false), []);
 
   if (isAuthenticated === null) {
-    return <main className="grid min-h-screen place-items-center">Loading…</main>;
+    return <FullPageStatus loadingText="Loading..." />;
   }
 
   if (isAuthenticated) {

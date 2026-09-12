@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   DndContext,
   DragOverlay,
@@ -16,8 +16,9 @@ import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { KanbanColumn } from "@/components/KanbanColumn";
 import { KanbanCardPreview } from "@/components/KanbanCardPreview";
 import { ChatSidebar } from "@/components/ChatSidebar";
+import { FullPageStatus } from "@/components/FullPageStatus";
 import type { BoardData } from "@/lib/kanban";
-import { ApiError } from "@/lib/api";
+import { describeApiError, notifyIfUnauthorized } from "@/lib/api";
 import * as api from "@/lib/api";
 
 type KanbanBoardProps = {
@@ -39,12 +40,12 @@ export const KanbanBoard = ({ boardId, onBack, onLogout, onUnauthorized }: Kanba
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
-  const cardsById = useMemo(() => board?.cards ?? {}, [board?.cards]);
+  const cardsById = board?.cards ?? {};
 
   useEffect(() => {
     api.getBoard(boardId).then(setBoard).catch((reason) => {
-      if (reason instanceof ApiError && reason.status === 401) onUnauthorized?.();
-      setError(reason instanceof Error ? reason.message : "The board request failed.");
+      notifyIfUnauthorized(reason, onUnauthorized);
+      setError(describeApiError(reason, "The board request failed."));
     });
   }, [boardId, onUnauthorized]);
 
@@ -54,10 +55,8 @@ export const KanbanBoard = ({ boardId, onBack, onLogout, onUnauthorized }: Kanba
       setBoard(await operation);
       return true;
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) {
-        onUnauthorized?.();
-      }
-      setError(reason instanceof Error ? reason.message : "The board request failed.");
+      notifyIfUnauthorized(reason, onUnauthorized);
+      setError(describeApiError(reason, "The board request failed."));
       return false;
     }
   };
@@ -101,7 +100,7 @@ export const KanbanBoard = ({ boardId, onBack, onLogout, onUnauthorized }: Kanba
   };
 
   if (!board) {
-    return <main className="grid min-h-screen place-items-center p-6">{error ? <p role="alert">{error}</p> : <p>Loading board...</p>}</main>;
+    return <FullPageStatus loadingText="Loading board..." error={error} />;
   }
 
   const activeCard = activeCardId ? cardsById[activeCardId] : null;
