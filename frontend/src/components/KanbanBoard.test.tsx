@@ -1,26 +1,69 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { KanbanBoard } from "@/components/KanbanBoard";
+import { initialData } from "@/lib/kanban";
+
+const { api } = vi.hoisted(() => ({
+  api: {
+    getBoard: vi.fn(),
+    getChatHistory: vi.fn(),
+    renameColumn: vi.fn(),
+    createCard: vi.fn(),
+    updateCard: vi.fn(),
+    deleteCard: vi.fn(),
+    moveCard: vi.fn(),
+  },
+}));
+const board = structuredClone(initialData);
+
+vi.mock("@/lib/api", () => api);
+
+const resetApi = () => {
+  Object.assign(board, structuredClone(initialData));
+  api.getBoard.mockImplementation(async () => structuredClone(board));
+  api.getChatHistory.mockResolvedValue([]);
+  api.renameColumn.mockImplementation(async (columnId: string, title: string) => {
+    board.columns = board.columns.map((column) => column.id === columnId ? { ...column, title } : column);
+    return structuredClone(board);
+  });
+  api.createCard.mockImplementation(async (columnId: string, title: string, details: string) => {
+    const id = "card-test";
+    board.cards[id] = { id, title, details: details || "No details yet." };
+    board.columns = board.columns.map((column) => column.id === columnId ? { ...column, cardIds: [...column.cardIds, id] } : column);
+    return structuredClone(board);
+  });
+  api.deleteCard.mockImplementation(async (cardId: string) => {
+    delete board.cards[cardId];
+    board.columns = board.columns.map((column) => ({ ...column, cardIds: column.cardIds.filter((id) => id !== cardId) }));
+    return structuredClone(board);
+  });
+};
 
 const getFirstColumn = () => screen.getAllByTestId(/column-/i)[0];
 
 describe("KanbanBoard", () => {
+  beforeEach(resetApi);
+
   it("renders five columns", () => {
     render(<KanbanBoard />);
-    expect(screen.getAllByTestId(/column-/i)).toHaveLength(5);
+    return waitFor(() => expect(screen.getAllByTestId(/column-/i)).toHaveLength(5));
   });
 
   it("renames a column", async () => {
     render(<KanbanBoard />);
+    await waitFor(() => expect(screen.getAllByTestId(/column-/i)).toHaveLength(5));
     const column = getFirstColumn();
     const input = within(column).getByLabelText("Column title");
     await userEvent.clear(input);
     await userEvent.type(input, "New Name");
     expect(input).toHaveValue("New Name");
+    await userEvent.tab();
+    await waitFor(() => expect(api.renameColumn).toHaveBeenCalledWith("col-backlog", "New Name"));
   });
 
   it("adds and removes a card", async () => {
     render(<KanbanBoard />);
+    await waitFor(() => expect(screen.getAllByTestId(/column-/i)).toHaveLength(5));
     const column = getFirstColumn();
     const addButton = within(column).getByRole("button", {
       name: /add a card/i,

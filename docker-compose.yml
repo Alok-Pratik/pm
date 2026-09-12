@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - pm_data:/app/data
+
+volumes:
+  pm_data:

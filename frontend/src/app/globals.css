@@ -1,6 +1,8 @@
 @import "tailwindcss";
 
 :root {
+  --font-display: "Space Grotesk", "Segoe UI", sans-serif;
+  --font-body: Manrope, "Segoe UI", sans-serif;
   --accent-yellow: #ecad0a;
   --primary-blue: #209dd7;
   --secondary-purple: #753991;
@@ -27,6 +29,33 @@ body {
   color: var(--navy-dark);
   font-family: var(--font-body), "Segoe UI", sans-serif;
   margin: 0;
+}
+
+.board-lane {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  min-width: 0;
+  width: 100%;
+}
+
+.board-column {
+  min-width: 0;
+  width: auto;
+  flex-shrink: 1;
+}
+
+@media (max-width: 767px) {
+  .board-lane {
+    display: flex;
+    min-width: max-content;
+    width: auto;
+  }
+
+  .board-column {
+    min-width: 280px;
+    width: 280px;
+    flex-shrink: 0;
+  }
 }
 
 .font-display {
