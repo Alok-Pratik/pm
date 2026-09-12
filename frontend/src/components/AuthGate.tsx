@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { KanbanBoard } from "@/components/KanbanBoard";
+import { Dashboard } from "@/components/Dashboard";
+import { getSession, login, logout, register } from "@/lib/api";
 
 type Credentials = {
   username: string;
@@ -12,13 +13,13 @@ const initialCredentials: Credentials = { username: "", password: "" };
 
 export const AuthGate = () => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [mode, setMode] = useState<"login" | "register">("login");
   const [credentials, setCredentials] = useState(initialCredentials);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/auth/session")
-      .then((response) => response.json())
-      .then((data: { authenticated: boolean }) => setIsAuthenticated(data.authenticated))
+    getSession()
+      .then((data) => setIsAuthenticated(data.authenticated))
       .catch(() => setIsAuthenticated(false));
   }, []);
 
@@ -26,22 +27,20 @@ export const AuthGate = () => {
     event.preventDefault();
     setError("");
 
-    const response = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(credentials),
-    });
-
-    if (!response.ok) {
-      setError("Use user and password to sign in.");
-      return;
+    try {
+      if (mode === "register") {
+        await register(credentials.username, credentials.password);
+      } else {
+        await login(credentials.username, credentials.password);
+      }
+      setIsAuthenticated(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Something went wrong.");
     }
-
-    setIsAuthenticated(true);
   };
 
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await logout().catch(() => undefined);
     setCredentials(initialCredentials);
     setIsAuthenticated(false);
   };
@@ -53,24 +52,28 @@ export const AuthGate = () => {
   }
 
   if (isAuthenticated) {
-    return <KanbanBoard onLogout={handleLogout} onUnauthorized={handleUnauthorized} />;
+    return <Dashboard onLogout={handleLogout} onUnauthorized={handleUnauthorized} />;
   }
+
+  const isRegister = mode === "register";
 
   return (
     <main className="grid min-h-screen place-items-center bg-[var(--surface)] p-6">
       <form
-        aria-label="Sign in"
+        aria-label={isRegister ? "Create account" : "Sign in"}
         onSubmit={handleSubmit}
         className="w-full max-w-md rounded-3xl border border-[var(--stroke)] bg-white p-8 shadow-[var(--shadow)]"
       >
         <p className="text-xs font-semibold uppercase tracking-[0.3em] text-[var(--primary-blue)]">
-          Project Management MVP
+          Project Management
         </p>
         <h1 className="mt-3 font-display text-3xl font-semibold text-[var(--navy-dark)]">
-          Welcome back
+          {isRegister ? "Create your account" : "Welcome back"}
         </h1>
         <p className="mt-3 text-sm leading-6 text-[var(--gray-text)]">
-          Sign in to open your Kanban board.
+          {isRegister
+            ? "Register to get your own boards and AI copilot."
+            : "Sign in to open your boards."}
         </p>
         <label className="mt-8 block text-sm font-semibold text-[var(--navy-dark)]">
           Username
@@ -97,12 +100,22 @@ export const AuthGate = () => {
             required
           />
         </label>
-        {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
+        {error && <p role="alert" className="mt-4 text-sm text-red-700">{error}</p>}
         <button
           type="submit"
           className="mt-6 w-full rounded-full bg-[var(--secondary-purple)] px-4 py-3 text-sm font-semibold text-white"
         >
-          Sign in
+          {isRegister ? "Create account" : "Sign in"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setError("");
+            setMode(isRegister ? "login" : "register");
+          }}
+          className="mt-4 w-full text-center text-sm font-semibold text-[var(--primary-blue)]"
+        >
+          {isRegister ? "Already have an account? Sign in" : "New here? Create an account"}
         </button>
       </form>
     </main>

@@ -1,20 +1,44 @@
 import { expect, test } from "@playwright/test";
 
-const signIn = async (page: import("@playwright/test").Page) => {
+// Backend usernames are capped at 32 characters, so keep this well under that.
+const uniqueUsername = (label: string) =>
+  `p${label.slice(0, 6)}${Date.now().toString(36)}${Math.floor(Math.random() * 1000).toString(36)}`;
+
+const registerAndOpenBoard = async (page: import("@playwright/test").Page, username: string) => {
   await page.goto("/");
-  await page.getByLabel("Username").fill("user");
-  await page.getByLabel("Password").fill("password");
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("heading", { name: "Kanban Studio" })).toBeVisible();
+  await page.getByRole("button", { name: /new here\? create an account/i }).click();
+  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Password").fill("password123");
+  await page.getByRole("button", { name: /^create account$/i }).click();
+  // A freshly registered user has exactly one board, so the app lands on it directly.
+  await expect(page.getByRole("heading", { name: "My board" })).toBeVisible();
 };
 
-test("loads the kanban board", async ({ page }) => {
-  await signIn(page);
+const currentBoardId = async (page: import("@playwright/test").Page): Promise<string> => {
+  const response = await page.request.get("/api/boards");
+  const data = await response.json();
+  return data.boards[0].id;
+};
+
+test("registers a new account and lands on a five-column starter board", async ({ page }) => {
+  await registerAndOpenBoard(page, uniqueUsername("register"));
   await expect(page.locator('[data-testid^="column-"]')).toHaveCount(5);
 });
 
+test("rejects registering the same username twice", async ({ page }) => {
+  const username = uniqueUsername("dupe");
+  await registerAndOpenBoard(page, username);
+  await page.request.post("/api/auth/logout");
+  await page.goto("/");
+  await page.getByRole("button", { name: /new here\? create an account/i }).click();
+  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Password").fill("password123");
+  await page.getByRole("button", { name: /^create account$/i }).click();
+  await expect(page.getByText(/already taken/i)).toBeVisible();
+});
+
 test("adds a card to a column", async ({ page }) => {
-  await signIn(page);
+  await registerAndOpenBoard(page, uniqueUsername("addcard"));
   const firstColumn = page.locator('[data-testid^="column-"]').first();
   const title = `Playwright card ${Date.now()}`;
   await firstColumn.getByRole("button", { name: /add a card/i }).click();
@@ -25,8 +49,11 @@ test("adds a card to a column", async ({ page }) => {
 });
 
 test("moves a card between columns", async ({ page }) => {
-  await signIn(page);
-  const sourceColumn = page.getByTestId("column-col-backlog");
+  await registerAndOpenBoard(page, uniqueUsername("movecard"));
+  const boardId = await currentBoardId(page);
+  const columns = page.locator('[data-testid^="column-"]');
+  const sourceColumn = columns.nth(0); // Backlog
+  const targetColumn = columns.nth(3); // Review
   const title = `Movable card ${Date.now()}`;
   await sourceColumn.getByRole("button", { name: /add a card/i }).click();
   await sourceColumn.getByPlaceholder("Card title").fill(title);
@@ -34,21 +61,21 @@ test("moves a card between columns", async ({ page }) => {
   const card = sourceColumn.locator('[data-testid^="card-"]').filter({ hasText: title });
   const cardTestId = await card.getAttribute("data-testid");
   if (!cardTestId) throw new Error("Movable card did not have a test id.");
+  const targetColumnId = await targetColumn.getAttribute("data-testid").then((id) => id?.replace(/^column-/, ""));
+  if (!targetColumnId) throw new Error("Target column did not have a test id.");
   await card.scrollIntoViewIfNeeded();
-  const targetColumn = page.getByTestId("column-col-review");
-  await targetColumn.scrollIntoViewIfNeeded();
   const cardId = cardTestId.replace(/^card-/, "");
-  const response = await page.request.post(`/api/cards/${cardId}/move`, {
-    data: { column_id: "col-review", position: 0 },
+  const response = await page.request.post(`/api/boards/${boardId}/cards/${cardId}/move`, {
+    data: { column_id: targetColumnId, position: 0 },
   });
   expect(response.ok()).toBeTruthy();
   const movedBoard = await response.json();
-  expect(movedBoard.columns.find((column: { id: string }) => column.id === "col-review").cardIds).toContain(cardId);
+  expect(movedBoard.columns.find((column: { id: string }) => column.id === targetColumnId).cardIds).toContain(cardId);
 });
 
 test("persists rename, edit, and delete operations", async ({ page }) => {
-  await signIn(page);
-  const firstColumn = page.getByTestId("column-col-backlog");
+  await registerAndOpenBoard(page, uniqueUsername("persist"));
+  const firstColumn = page.locator('[data-testid^="column-"]').first();
   const titleInput = firstColumn.getByLabel("Column title");
   await titleInput.fill("Queued");
   await titleInput.blur();
@@ -73,37 +100,18 @@ test("persists rename, edit, and delete operations", async ({ page }) => {
   await expect(persistedCard).not.toBeVisible();
 
   await page.reload();
-  await expect(page.getByTestId("column-col-backlog").getByLabel("Column title")).toHaveValue("Queued");
+  await expect(page.locator('[data-testid^="column-"]').first().getByLabel("Column title")).toHaveValue("Queued");
   await expect(page.getByText("Updated customer signals")).not.toBeVisible();
 });
 
-test("moves the Review card between columns", async ({ page }) => {
-  await signIn(page);
-  const sourceColumn = page.getByTestId("column-col-review");
-  const title = `Review movable card ${Date.now()}`;
-  await sourceColumn.getByRole("button", { name: /add a card/i }).click();
-  await sourceColumn.getByPlaceholder("Card title").fill(title);
-  await sourceColumn.getByRole("button", { name: /add card/i }).click();
-  const card = sourceColumn.locator('[data-testid^="card-"]').filter({ hasText: title });
-  const cardTestId = await card.getAttribute("data-testid");
-  if (!cardTestId) throw new Error("Review card did not have a test id.");
-  await card.scrollIntoViewIfNeeded();
-  const movedCardId = cardTestId.replace(/^card-/, "");
-  const response = await page.request.post(`/api/cards/${movedCardId}/move`, {
-    data: { column_id: "col-backlog", position: 0 },
-  });
-  expect(response.ok()).toBeTruthy();
-  const movedBoard = await response.json();
-  expect(movedBoard.columns.find((column: { id: string }) => column.id === "col-backlog").cardIds).toContain(movedCardId);
-});
-
 test("chat sidebar applies the canonical board response", async ({ page }) => {
-  await signIn(page);
-  const boardResponse = await page.request.get("/api/board");
+  await registerAndOpenBoard(page, uniqueUsername("chat"));
+  const boardId = await currentBoardId(page);
+  const boardResponse = await page.request.get(`/api/boards/${boardId}`);
   const board = await boardResponse.json();
   board.columns[0].title = "AI Ideas";
 
-  await page.route("**/api/chat**", async (route) => {
+  await page.route(`**/api/boards/${boardId}/chat`, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -114,25 +122,22 @@ test("chat sidebar applies the canonical board response", async ({ page }) => {
   await page.getByLabel("Message the AI assistant").fill("Rename the first column.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByText("I renamed the first column.")).toBeVisible();
-  await expect(page.getByTestId("column-col-backlog").getByLabel("Column title")).toHaveValue("AI Ideas");
+  await expect(page.locator('[data-testid^="column-"]').first().getByLabel("Column title")).toHaveValue("AI Ideas");
 });
 
 test("keeps the board and chatbot usable on a narrow viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await signIn(page);
+  await registerAndOpenBoard(page, uniqueUsername("mobile"));
   await expect(page.locator('[data-testid^="column-"]')).toHaveCount(5);
   await expect(page.getByRole("complementary", { name: "AI assistant" })).toBeVisible();
   await expect(page.locator(".board-lane")).toHaveCSS("display", "flex");
 });
 
-// --- drag and drop (#16) ---
+// --- drag and drop ---
 
 test("drag and drop reorders a card within a column via pointer events", async ({ page }) => {
-  await signIn(page);
-
-  // Use col-discovery: unmodified by other tests in this suite, starts with one seed card.
-  // Add two fresh cards so we have full control over the initial order.
-  const discovery = page.getByTestId("column-col-discovery");
+  await registerAndOpenBoard(page, uniqueUsername("dnd"));
+  const discovery = page.locator('[data-testid^="column-"]').nth(1); // Discovery
 
   const titleA = `DnD card A ${Date.now()}`;
   const titleB = `DnD card B ${Date.now() + 1}`;
@@ -171,8 +176,10 @@ test("drag and drop reorders a card within a column via pointer events", async (
   // Allow the API move call to complete
   await page.waitForTimeout(600);
 
-  const board = await page.request.get("/api/board").then((r) => r.json());
-  const discoveryCol = board.columns.find((c: { id: string }) => c.id === "col-discovery");
+  const boardId = await currentBoardId(page);
+  const board = await page.request.get(`/api/boards/${boardId}`).then((r) => r.json());
+  const discoveryColumnId = board.columns[1].id;
+  const discoveryCol = board.columns.find((c: { id: string }) => c.id === discoveryColumnId);
   const aIndex = discoveryCol.cardIds.indexOf(cardAId);
   // Card A should have moved from its original position — the drag was registered
   expect(aIndex).toBeGreaterThan(-1);
@@ -180,20 +187,74 @@ test("drag and drop reorders a card within a column via pointer events", async (
   expect(allTitles.indexOf(titleB)).toBeLessThan(allTitles.indexOf(titleA));
 });
 
-// --- failed login and session expiry (#20) ---
+// --- auth ---
 
 test("shows an error message on invalid credentials", async ({ page }) => {
+  const username = uniqueUsername("badlogin");
+  await registerAndOpenBoard(page, username);
+  await page.request.post("/api/auth/logout");
   await page.goto("/");
-  await page.getByLabel("Username").fill("user");
+  await page.getByLabel("Username").fill(username);
   await page.getByLabel("Password").fill("wrongpassword");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByText(/use user and password/i)).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Kanban Studio" })).not.toBeVisible();
+  await expect(page.getByText(/invalid credentials/i)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "My board" })).not.toBeVisible();
 });
 
 test("returns to login when session cookie is cleared", async ({ page }) => {
-  await signIn(page);
+  await registerAndOpenBoard(page, uniqueUsername("sessionexpiry"));
   await page.context().clearCookies();
   await page.reload();
   await expect(page.getByRole("button", { name: /sign in/i })).toBeVisible();
+});
+
+// --- multi-board ---
+
+test("creates a second board, switches between boards, and keeps data isolated", async ({ page }) => {
+  await registerAndOpenBoard(page, uniqueUsername("multiboard"));
+
+  await page.getByRole("button", { name: /all boards/i }).click();
+  await expect(page.getByRole("heading", { name: "Your boards" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "My board" })).toBeVisible();
+
+  await page.getByLabel("New board title").fill("Marketing launch");
+  await page.getByRole("button", { name: /create board/i }).click();
+  // Creating a board opens it immediately rather than leaving you on the switcher.
+  await expect(page.getByRole("heading", { name: "Marketing launch" })).toBeVisible();
+  // A brand-new board starts with five empty columns, unlike the seeded starter board.
+  await expect(page.locator('[data-testid^="card-"]')).toHaveCount(0);
+
+  const title = `Marketing-only card ${Date.now()}`;
+  const firstColumn = page.locator('[data-testid^="column-"]').first();
+  await firstColumn.getByRole("button", { name: /add a card/i }).click();
+  await firstColumn.getByPlaceholder("Card title").fill(title);
+  await firstColumn.getByRole("button", { name: /add card/i }).click();
+  await expect(firstColumn.getByText(title)).toBeVisible();
+
+  await page.getByRole("button", { name: /all boards/i }).click();
+  await page.getByRole("button", { name: "My board" }).click();
+  await expect(page.getByRole("heading", { name: "My board" })).toBeVisible();
+  await expect(page.getByText(title)).not.toBeVisible();
+});
+
+test("renaming and deleting a board updates the switcher", async ({ page }) => {
+  await registerAndOpenBoard(page, uniqueUsername("boardmgmt"));
+  await page.getByRole("button", { name: /all boards/i }).click();
+
+  await page.getByLabel("New board title").fill("Temp board");
+  await page.getByRole("button", { name: /create board/i }).click();
+  // Creating a board opens it immediately; go back to the switcher to manage it.
+  await expect(page.getByRole("heading", { name: "Temp board" })).toBeVisible();
+  await page.getByRole("button", { name: /all boards/i }).click();
+  await expect(page.getByRole("button", { name: "Temp board" })).toBeVisible();
+
+  const row = page.getByRole("listitem").filter({ hasText: "Temp board" });
+  await row.getByRole("button", { name: /rename/i }).click();
+  const renameInput = page.getByLabel("Rename Temp board");
+  await renameInput.fill("Renamed board");
+  await renameInput.blur();
+  await expect(page.getByRole("button", { name: "Renamed board" })).toBeVisible();
+
+  await page.getByRole("listitem").filter({ hasText: "Renamed board" }).getByRole("button", { name: /delete/i }).click();
+  await expect(page.getByRole("button", { name: "Renamed board" })).not.toBeVisible();
 });

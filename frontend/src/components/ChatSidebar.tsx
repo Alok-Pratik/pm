@@ -5,21 +5,23 @@ import type { BoardData } from "@/lib/kanban";
 import { ApiError, getChatHistory, sendChat, type ChatMessage } from "@/lib/api";
 
 type ChatSidebarProps = {
+  boardId: string;
   onBoardUpdate: (board: BoardData) => void;
   onUnauthorized?: () => void;
 };
 
-export const ChatSidebar = ({ onBoardUpdate, onUnauthorized }: ChatSidebarProps) => {
+export const ChatSidebar = ({ boardId, onBoardUpdate, onUnauthorized }: ChatSidebarProps) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    getChatHistory().then(setMessages).catch((reason) => {
+    setMessages([]);
+    getChatHistory(boardId).then(setMessages).catch((reason) => {
       if (reason instanceof ApiError && reason.status === 401) onUnauthorized?.();
     });
-  }, [onUnauthorized]);
+  }, [boardId, onUnauthorized]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -31,7 +33,7 @@ export const ChatSidebar = ({ onBoardUpdate, onUnauthorized }: ChatSidebarProps)
     setMessages((current) => [...current, { role: "user", content }]);
     setIsSending(true);
     try {
-      const response = await sendChat(content);
+      const response = await sendChat(boardId, content);
       onBoardUpdate(response.board);
       setMessages((current) => [...current, { role: "assistant", content: response.message }]);
     } catch (reason) {

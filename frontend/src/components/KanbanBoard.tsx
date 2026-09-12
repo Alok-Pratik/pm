@@ -21,11 +21,13 @@ import { ApiError } from "@/lib/api";
 import * as api from "@/lib/api";
 
 type KanbanBoardProps = {
+  boardId: string;
+  onBack?: () => void;
   onLogout?: () => void;
   onUnauthorized?: () => void;
 };
 
-export const KanbanBoard = ({ onLogout, onUnauthorized }: KanbanBoardProps) => {
+export const KanbanBoard = ({ boardId, onBack, onLogout, onUnauthorized }: KanbanBoardProps) => {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -40,11 +42,11 @@ export const KanbanBoard = ({ onLogout, onUnauthorized }: KanbanBoardProps) => {
   const cardsById = useMemo(() => board?.cards ?? {}, [board?.cards]);
 
   useEffect(() => {
-    api.getBoard().then(setBoard).catch((reason) => {
+    api.getBoard(boardId).then(setBoard).catch((reason) => {
       if (reason instanceof ApiError && reason.status === 401) onUnauthorized?.();
       setError(reason instanceof Error ? reason.message : "The board request failed.");
     });
-  }, [onUnauthorized]);
+  }, [boardId, onUnauthorized]);
 
   const apply = async (operation: Promise<BoardData>): Promise<boolean> => {
     setError("");
@@ -78,24 +80,24 @@ export const KanbanBoard = ({ onLogout, onUnauthorized }: KanbanBoardProps) => {
     const targetColumn = board.columns.find((column) => column.id === over.id || column.cardIds.includes(over.id as string));
     if (!targetColumn) return;
     const position = targetColumn.id === over.id ? targetColumn.cardIds.length : targetColumn.cardIds.indexOf(over.id as string);
-    void apply(api.moveCard(active.id as string, targetColumn.id, position));
+    void apply(api.moveCard(boardId, active.id as string, targetColumn.id, position));
   };
 
   const handleRenameColumn = (columnId: string, title: string) => {
-    if (title.trim()) return apply(api.renameColumn(columnId, title));
+    if (title.trim()) return apply(api.renameColumn(boardId, columnId, title));
     return Promise.resolve(false);
   };
 
   const handleAddCard = (columnId: string, title: string, details: string) => {
-    void apply(api.createCard(columnId, title, details));
+    void apply(api.createCard(boardId, columnId, title, details));
   };
 
   const handleDeleteCard = (columnId: string, cardId: string) => {
-    void apply(api.deleteCard(cardId));
+    void apply(api.deleteCard(boardId, cardId));
   };
 
   const handleEditCard = (cardId: string, title: string, details: string) => {
-    void apply(api.updateCard(cardId, title, details));
+    void apply(api.updateCard(boardId, cardId, title, details));
   };
 
   if (!board) {
@@ -114,23 +116,35 @@ export const KanbanBoard = ({ onLogout, onUnauthorized }: KanbanBoardProps) => {
           <div className="flex flex-wrap items-start justify-between gap-6">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.35em] text-[var(--gray-text)]">
-                Single Board Kanban
+                Kanban Studio
               </p>
               <h1 className="mt-3 font-display text-4xl font-semibold text-[var(--navy-dark)]">
-                Kanban Studio
+                {board.title}
               </h1>
               <p className="mt-3 max-w-xl text-sm leading-6 text-[var(--gray-text)]">
                 Keep momentum visible. Rename columns, drag cards between stages,
                 and capture quick notes without getting buried in settings.
               </p>
             </div>
-            <div className="rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-5 py-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[var(--gray-text)]">
-                Focus
-              </p>
-              <p className="mt-2 text-lg font-semibold text-[var(--primary-blue)]">
-                One board. Five columns. Zero clutter.
-              </p>
+            <div className="flex flex-wrap items-center gap-3">
+              {onBack && (
+                <button
+                  type="button"
+                  onClick={onBack}
+                  className="rounded-full border border-[var(--stroke)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--navy-dark)]"
+                >
+                  All boards
+                </button>
+              )}
+              {onLogout && (
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  className="rounded-full border border-[var(--stroke)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--navy-dark)]"
+                >
+                  Sign out
+                </button>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-4">
@@ -143,15 +157,6 @@ export const KanbanBoard = ({ onLogout, onUnauthorized }: KanbanBoardProps) => {
                 {column.title}
               </div>
             ))}
-            {onLogout && (
-              <button
-                type="button"
-                onClick={onLogout}
-                className="rounded-full border border-[var(--stroke)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--navy-dark)]"
-              >
-                Sign out
-              </button>
-            )}
           </div>
         </header>
         {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</p>}
@@ -187,7 +192,7 @@ export const KanbanBoard = ({ onLogout, onUnauthorized }: KanbanBoardProps) => {
               ) : null}
             </DragOverlay>
           </DndContext>
-          <ChatSidebar onBoardUpdate={setBoard} onUnauthorized={onUnauthorized} />
+          <ChatSidebar boardId={boardId} onBoardUpdate={setBoard} onUnauthorized={onUnauthorized} />
         </div>
       </main>
     </div>

@@ -1,7 +1,9 @@
 import os
+import secrets
 import sqlite3
 from pathlib import Path
 
+import bcrypt
 from fastapi import HTTPException
 
 
@@ -47,12 +49,30 @@ def write_connect() -> sqlite3.Connection:
 
 
 def initialize(connection: sqlite3.Connection) -> None:
+    # `boards` must reach its final schema before columns/cards/chat_messages are created:
+    # SQLite silently rewrites their FK clauses to point at a renamed table, so migrating
+    # `boards` afterwards (see _drop_boards_one_per_user_constraint) would leave those FKs
+    # dangling on a dropped `boards_old`.
     connection.executescript("""
-        CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE);
-        CREATE TABLE IF NOT EXISTS boards (
-          id TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS boards (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          title TEXT NOT NULL DEFAULT 'Board',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    _ensure_column(connection, "users", "password_hash", "password_hash TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "boards", "title", "title TEXT NOT NULL DEFAULT 'Board'")
+    _drop_boards_one_per_user_constraint(connection)
+
+    connection.executescript("""
+        CREATE INDEX IF NOT EXISTS boards_by_user ON boards(user_id);
         CREATE TABLE IF NOT EXISTS columns (
           id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
           title TEXT NOT NULL, position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 4),
@@ -77,21 +97,132 @@ def initialize(connection: sqlite3.Connection) -> None:
     """)
 
 
-def resolve_board(connection: sqlite3.Connection, user_id: str = "user") -> str:
-    """Ensure user/board rows and seed data exist; return board_id."""
-    connection.execute("INSERT OR IGNORE INTO users (id, username) VALUES (?, ?)", (user_id, user_id))
-    board_id = f"board-{user_id}"
-    connection.execute("INSERT OR IGNORE INTO boards (id, user_id) VALUES (?, ?)", (board_id, user_id))
-    if connection.execute("SELECT COUNT(*) FROM columns WHERE board_id = ?", (board_id,)).fetchone()[0] == 0:
-        for position, (column_id, title) in enumerate(SEED_COLUMNS):
-            connection.execute("INSERT INTO columns VALUES (?, ?, ?, ?)", (column_id, board_id, title, position))
-        for card_id, column_id, title, details in SEED_CARDS:
-            position = connection.execute("SELECT COUNT(*) FROM cards WHERE column_id = ?", (column_id,)).fetchone()[0]
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def _drop_boards_one_per_user_constraint(connection: sqlite3.Connection) -> None:
+    """Older schema had `boards.user_id UNIQUE` (one board per user); rebuild without it.
+
+    On a DB that already has `columns`/`chat_messages` referencing `boards(id)`, a plain
+    rename makes SQLite silently rewrite those FK clauses to point at the doomed
+    `boards_old` (RENAME TABLE's default behavior, meant to keep FKs valid when a table is
+    renamed for good — and it applies whenever `foreign_keys` is on, regardless of
+    `legacy_alter_table`). Both pragmas have to be flipped together to suppress it, so the
+    dependent tables keep referencing `boards` — which still exists, just re-created, once
+    this finishes."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'boards'"
+    ).fetchone()
+    if row and row["sql"] and "user_id TEXT NOT NULL UNIQUE" in row["sql"]:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            connection.executescript("""
+                ALTER TABLE boards RENAME TO boards_old;
+                CREATE TABLE boards (
+                  id TEXT PRIMARY KEY,
+                  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  title TEXT NOT NULL DEFAULT 'Board',
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO boards (id, user_id, title, created_at, updated_at)
+                  SELECT id, user_id, COALESCE(NULLIF(title, ''), 'Board'), created_at, updated_at FROM boards_old;
+                DROP TABLE boards_old;
+                CREATE INDEX IF NOT EXISTS boards_by_user ON boards(user_id);
+            """)
+        finally:
+            connection.execute("PRAGMA legacy_alter_table = OFF")
+            connection.execute("PRAGMA foreign_keys = ON")
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    if not password_hash:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except ValueError:
+        return False
+
+
+def get_user_by_username(connection: sqlite3.Connection, username: str) -> sqlite3.Row | None:
+    return connection.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+
+
+def get_user_by_id(connection: sqlite3.Connection, user_id: str) -> sqlite3.Row | None:
+    return connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
+def create_user(connection: sqlite3.Connection, username: str, password: str) -> str:
+    user_id = f"user-{secrets.token_hex(8)}"
+    connection.execute(
+        "INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)",
+        (user_id, username, hash_password(password)),
+    )
+    return user_id
+
+
+def insert_board(connection: sqlite3.Connection, user_id: str, title: str, seed: bool = False) -> str:
+    """Create a board with five fixed columns. `id` is a global PRIMARY KEY across all
+    boards, so every column/card id is namespaced under this board's id — never reuse
+    the bare SEED_COLUMNS/SEED_CARDS ids directly, or two users' boards would collide."""
+    board_id = f"board-{secrets.token_hex(8)}"
+    connection.execute(
+        "INSERT INTO boards (id, user_id, title) VALUES (?, ?, ?)", (board_id, user_id, title)
+    )
+    column_ids = {}
+    for position, (seed_column_id, column_title) in enumerate(SEED_COLUMNS):
+        column_id = f"{board_id}-{seed_column_id}"
+        column_ids[seed_column_id] = column_id
+        connection.execute(
+            "INSERT INTO columns (id, board_id, title, position) VALUES (?, ?, ?, ?)",
+            (column_id, board_id, column_title, position),
+        )
+    if seed:
+        for seed_card_id, seed_column_id, card_title, details in SEED_CARDS:
+            column_id = column_ids[seed_column_id]
+            position = connection.execute(
+                "SELECT COUNT(*) FROM cards WHERE column_id = ?", (column_id,)
+            ).fetchone()[0]
+            card_id = f"{board_id}-{seed_card_id}"
             connection.execute(
                 "INSERT INTO cards (id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
-                (card_id, column_id, title, details, position),
+                (card_id, column_id, card_title, details, position),
             )
     return board_id
+
+
+def boards_for_user(connection: sqlite3.Connection, user_id: str) -> list[dict]:
+    rows = connection.execute(
+        "SELECT id, title FROM boards WHERE user_id = ? ORDER BY created_at, id", (user_id,)
+    ).fetchall()
+    return [{"id": row["id"], "title": row["title"]} for row in rows]
+
+
+def owned_board(connection: sqlite3.Connection, board_id: str, user_id: str) -> sqlite3.Row:
+    board = connection.execute(
+        "SELECT * FROM boards WHERE id = ? AND user_id = ?", (board_id, user_id)
+    ).fetchone()
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+    return board
+
+
+def update_board_title(connection: sqlite3.Connection, board_id: str, title: str) -> None:
+    connection.execute(
+        "UPDATE boards SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (title, board_id)
+    )
+
+
+def remove_board(connection: sqlite3.Connection, board_id: str) -> None:
+    connection.execute("DELETE FROM boards WHERE id = ?", (board_id,))
 
 
 def get_board(connection: sqlite3.Connection, board_id: str) -> dict:

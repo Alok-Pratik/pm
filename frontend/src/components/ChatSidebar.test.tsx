@@ -24,7 +24,7 @@ describe("ChatSidebar", () => {
   });
 
   it("shows placeholder when there are no messages", async () => {
-    render(<ChatSidebar onBoardUpdate={vi.fn()} />);
+    render(<ChatSidebar boardId="board-test" onBoardUpdate={vi.fn()} />);
     await waitFor(() =>
       expect(screen.getByText(/ask for a board update/i)).toBeInTheDocument()
     );
@@ -32,20 +32,21 @@ describe("ChatSidebar", () => {
 
   it("sends a message and displays the assistant reply", async () => {
     const onBoardUpdate = vi.fn();
-    render(<ChatSidebar onBoardUpdate={onBoardUpdate} />);
-    await waitFor(() => expect(api.getChatHistory).toHaveBeenCalled());
+    render(<ChatSidebar boardId="board-test" onBoardUpdate={onBoardUpdate} />);
+    await waitFor(() => expect(api.getChatHistory).toHaveBeenCalledWith("board-test"));
 
     await userEvent.type(screen.getByLabelText(/message the ai assistant/i), "Hello AI");
     await userEvent.click(screen.getByRole("button", { name: /send message/i }));
 
     await waitFor(() => expect(screen.getByText("Board updated.")).toBeInTheDocument());
+    expect(api.sendChat).toHaveBeenCalledWith("board-test", "Hello AI");
     expect(onBoardUpdate).toHaveBeenCalledWith(mockBoard);
     expect(screen.getByText("Hello AI")).toBeInTheDocument();
   });
 
   it("removes the optimistic user message and shows an error on failure", async () => {
     api.sendChat.mockRejectedValue(new Error("Network error"));
-    render(<ChatSidebar onBoardUpdate={vi.fn()} />);
+    render(<ChatSidebar boardId="board-test" onBoardUpdate={vi.fn()} />);
     await waitFor(() => expect(api.getChatHistory).toHaveBeenCalled());
 
     await userEvent.type(screen.getByLabelText(/message the ai assistant/i), "Fail me");
@@ -58,14 +59,14 @@ describe("ChatSidebar", () => {
   it("calls onUnauthorized on 401 during history load", async () => {
     api.getChatHistory.mockRejectedValue(new ApiError("Unauthorized", 401));
     const onUnauthorized = vi.fn();
-    render(<ChatSidebar onBoardUpdate={vi.fn()} onUnauthorized={onUnauthorized} />);
+    render(<ChatSidebar boardId="board-test" onBoardUpdate={vi.fn()} onUnauthorized={onUnauthorized} />);
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled());
   });
 
   it("shows Sending state and re-enables after completion", async () => {
     let resolve: (v: unknown) => void;
     api.sendChat.mockImplementation(() => new Promise((r) => { resolve = r; }));
-    render(<ChatSidebar onBoardUpdate={vi.fn()} />);
+    render(<ChatSidebar boardId="board-test" onBoardUpdate={vi.fn()} />);
     await waitFor(() => expect(api.getChatHistory).toHaveBeenCalled());
 
     await userEvent.type(screen.getByLabelText(/message the ai assistant/i), "Hello");

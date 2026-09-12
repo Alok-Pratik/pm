@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,16 +14,24 @@ from app.ai import build_prompt, parse_ai_response
 from app.config import OpenRouterSettings
 from app.database import (
     apply_board_operations,
+    boards_for_user,
     connect,
+    create_user,
     do_move_card,
     get_board,
+    get_user_by_id,
+    get_user_by_username,
     initialize,
+    insert_board,
+    owned_board,
     owned_card,
     owned_column,
     recent_chat_messages,
-    resolve_board,
+    remove_board,
     rewrite_positions,
     save_chat_message,
+    update_board_title,
+    verify_password,
     write_connect,
 )
 from app.openrouter import OpenRouterError, OpenRouterService
@@ -30,6 +39,10 @@ from app.openrouter import OpenRouterError, OpenRouterService
 logger = logging.getLogger(__name__)
 
 _MAX_CHAT_MESSAGE_LEN = 2000
+_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
+_MIN_PASSWORD_LEN = 8
+_MAX_PASSWORD_LEN = 128
+_MAX_BOARD_TITLE_LEN = 100
 
 
 @asynccontextmanager
@@ -39,7 +52,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Project Management MVP", lifespan=lifespan)
+app = FastAPI(title="Project Management", lifespan=lifespan)
 
 if not os.environ.get("SESSION_SECRET"):
     logger.warning(
@@ -52,9 +65,22 @@ app.add_middleware(SessionMiddleware, secret_key=_session_secret)
 frontend_dir = Path(__file__).parent / "static"
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class BoardCreate(BaseModel):
+    title: str = "Untitled board"
+
+
+class BoardRename(BaseModel):
+    title: str
 
 
 class ColumnUpdate(BaseModel):
@@ -89,9 +115,10 @@ def openrouter_service() -> OpenRouterService:
 
 
 def signed_in_user(request: Request) -> str:
-    if request.session.get("user_id") != "user":
+    user_id = request.session.get("user_id")
+    if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
-    return "user"
+    return user_id
 
 
 @app.get("/health")
@@ -100,53 +127,121 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/auth/session")
-def session(request: Request) -> dict[str, bool]:
-    return {"authenticated": request.session.get("user_id") == "user"}
+def session(request: Request) -> dict:
+    user_id = request.session.get("user_id")
+    if user_id:
+        with connect() as connection:
+            user = get_user_by_id(connection, user_id)
+        if user:
+            return {"authenticated": True, "username": user["username"]}
+        request.session.clear()
+    return {"authenticated": False}
+
+
+@app.post("/api/auth/register")
+def register(payload: RegisterRequest, request: Request) -> dict:
+    username = payload.username.strip()
+    if not _USERNAME_PATTERN.fullmatch(username):
+        raise HTTPException(
+            status_code=422,
+            detail="Username must be 3-32 characters and may only contain letters, digits, '.', '_', or '-'",
+        )
+    if not (_MIN_PASSWORD_LEN <= len(payload.password) <= _MAX_PASSWORD_LEN):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Password must be between {_MIN_PASSWORD_LEN} and {_MAX_PASSWORD_LEN} characters",
+        )
+    with write_connect() as connection:
+        if get_user_by_username(connection, username):
+            raise HTTPException(status_code=409, detail="Username is already taken")
+        user_id = create_user(connection, username, payload.password)
+        insert_board(connection, user_id, "My board", seed=True)
+    request.session["user_id"] = user_id
+    return {"authenticated": True, "username": username}
 
 
 @app.post("/api/auth/login")
-def login(credentials: LoginRequest, request: Request) -> dict[str, bool]:
-    if credentials.username != "user" or credentials.password != "password":
+def login(credentials: LoginRequest, request: Request) -> dict:
+    with connect() as connection:
+        user = get_user_by_username(connection, credentials.username.strip())
+    if not user or not verify_password(credentials.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    request.session["user_id"] = "user"
-    return {"authenticated": True}
+    request.session["user_id"] = user["id"]
+    return {"authenticated": True, "username": user["username"]}
 
 
 @app.post("/api/auth/logout")
-def logout(request: Request) -> dict[str, bool]:
+def logout(request: Request) -> dict:
     request.session.clear()
     return {"authenticated": False}
 
 
-@app.get("/api/board")
-def read_board(request: Request) -> dict:
+@app.get("/api/boards")
+def list_boards(request: Request) -> dict:
     user = signed_in_user(request)
     with connect() as connection:
-        board_id = resolve_board(connection, user)
-        return get_board(connection, board_id)
+        return {"boards": boards_for_user(connection, user)}
 
 
-@app.put("/api/columns/{column_id}")
-def rename_column(column_id: str, update: ColumnUpdate, request: Request) -> dict:
+@app.post("/api/boards")
+def create_board(payload: BoardCreate, request: Request) -> dict:
+    title = payload.title.strip()[:_MAX_BOARD_TITLE_LEN] or "Untitled board"
+    user = signed_in_user(request)
+    with write_connect() as connection:
+        board_id = insert_board(connection, user, title)
+        return {"id": board_id, "title": title, **get_board(connection, board_id)}
+
+
+@app.get("/api/boards/{board_id}")
+def read_board(board_id: str, request: Request) -> dict:
+    user = signed_in_user(request)
+    with connect() as connection:
+        board = owned_board(connection, board_id, user)
+        return {"id": board["id"], "title": board["title"], **get_board(connection, board_id)}
+
+
+@app.patch("/api/boards/{board_id}")
+def rename_board(board_id: str, payload: BoardRename, request: Request) -> dict:
+    title = payload.title.strip()[:_MAX_BOARD_TITLE_LEN]
+    if not title:
+        raise HTTPException(status_code=422, detail="Board title is required")
+    user = signed_in_user(request)
+    with write_connect() as connection:
+        owned_board(connection, board_id, user)
+        update_board_title(connection, board_id, title)
+        return {"id": board_id, "title": title, **get_board(connection, board_id)}
+
+
+@app.delete("/api/boards/{board_id}")
+def delete_board(board_id: str, request: Request) -> dict:
+    user = signed_in_user(request)
+    with write_connect() as connection:
+        owned_board(connection, board_id, user)
+        remove_board(connection, board_id)
+        return {"boards": boards_for_user(connection, user)}
+
+
+@app.put("/api/boards/{board_id}/columns/{column_id}")
+def rename_column(board_id: str, column_id: str, update: ColumnUpdate, request: Request) -> dict:
     title = update.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="Column title is required")
     user = signed_in_user(request)
     with write_connect() as connection:
-        board_id = resolve_board(connection, user)
+        owned_board(connection, board_id, user)
         owned_column(connection, column_id, board_id)
         connection.execute("UPDATE columns SET title = ? WHERE id = ?", (title, column_id))
         return get_board(connection, board_id)
 
 
-@app.post("/api/cards")
-def create_card(card: CardCreate, request: Request) -> dict:
+@app.post("/api/boards/{board_id}/cards")
+def create_card(board_id: str, card: CardCreate, request: Request) -> dict:
     title = card.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="Card title is required")
     user = signed_in_user(request)
     with write_connect() as connection:
-        board_id = resolve_board(connection, user)
+        owned_board(connection, board_id, user)
         owned_column(connection, card.column_id, board_id)
         position = connection.execute(
             "SELECT COUNT(*) FROM cards WHERE column_id = ?", (card.column_id,)
@@ -159,11 +254,11 @@ def create_card(card: CardCreate, request: Request) -> dict:
         return get_board(connection, board_id)
 
 
-@app.patch("/api/cards/{card_id}")
-def edit_card(card_id: str, update: CardUpdate, request: Request) -> dict:
+@app.patch("/api/boards/{board_id}/cards/{card_id}")
+def edit_card(board_id: str, card_id: str, update: CardUpdate, request: Request) -> dict:
     user = signed_in_user(request)
     with write_connect() as connection:
-        board_id = resolve_board(connection, user)
+        owned_board(connection, board_id, user)
         card = owned_card(connection, card_id, board_id)
         title = card["title"] if update.title is None else update.title.strip()
         if not title:
@@ -176,11 +271,11 @@ def edit_card(card_id: str, update: CardUpdate, request: Request) -> dict:
         return get_board(connection, board_id)
 
 
-@app.delete("/api/cards/{card_id}")
-def delete_card(card_id: str, request: Request) -> dict:
+@app.delete("/api/boards/{board_id}/cards/{card_id}")
+def delete_card(board_id: str, card_id: str, request: Request) -> dict:
     user = signed_in_user(request)
     with write_connect() as connection:
-        board_id = resolve_board(connection, user)
+        owned_board(connection, board_id, user)
         card = owned_card(connection, card_id, board_id)
         connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
         remaining = [
@@ -193,19 +288,19 @@ def delete_card(card_id: str, request: Request) -> dict:
         return get_board(connection, board_id)
 
 
-@app.post("/api/cards/{card_id}/move")
-def move_card(card_id: str, move: CardMove, request: Request) -> dict:
+@app.post("/api/boards/{board_id}/cards/{card_id}/move")
+def move_card(board_id: str, card_id: str, move: CardMove, request: Request) -> dict:
     if move.position < 0:
         raise HTTPException(status_code=422, detail="Position must be zero or greater")
     user = signed_in_user(request)
     with write_connect() as connection:
-        board_id = resolve_board(connection, user)
+        owned_board(connection, board_id, user)
         do_move_card(connection, card_id, move.column_id, move.position, board_id)
         return get_board(connection, board_id)
 
 
-@app.post("/api/chat")
-async def chat(chat_request: ChatRequest, request: Request) -> dict:
+@app.post("/api/boards/{board_id}/chat")
+async def chat(board_id: str, chat_request: ChatRequest, request: Request) -> dict:
     message = chat_request.message.strip()
     if not message:
         raise HTTPException(status_code=422, detail="Message is required")
@@ -216,14 +311,12 @@ async def chat(chat_request: ChatRequest, request: Request) -> dict:
         )
     user = signed_in_user(request)
 
-    def load_context() -> tuple[str, dict, list[dict]]:
+    def load_context() -> tuple[dict, list[dict]]:
         with connect() as connection:
-            board_id = resolve_board(connection, user)
-            return board_id, get_board(connection, board_id), recent_chat_messages(
-                connection, user, board_id
-            )
+            owned_board(connection, board_id, user)
+            return get_board(connection, board_id), recent_chat_messages(connection, user, board_id)
 
-    board_id, board, history = await asyncio.to_thread(load_context)
+    board, history = await asyncio.to_thread(load_context)
 
     try:
         content = await openrouter_service().complete_messages(build_prompt(board, history, message))
@@ -235,7 +328,7 @@ async def chat(chat_request: ChatRequest, request: Request) -> dict:
 
     def apply_changes() -> dict:
         with write_connect() as connection:
-            board_id = resolve_board(connection, user)
+            owned_board(connection, board_id, user)
             save_chat_message(connection, user, board_id, "user", message)
             try:
                 apply_board_operations(connection, board_id, response.operations)
@@ -250,11 +343,11 @@ async def chat(chat_request: ChatRequest, request: Request) -> dict:
     return {"version": response.version, "message": response.message, "board": board}
 
 
-@app.get("/api/chat/history")
-def chat_history(request: Request) -> dict:
+@app.get("/api/boards/{board_id}/chat/history")
+def chat_history(board_id: str, request: Request) -> dict:
     user = signed_in_user(request)
     with connect() as connection:
-        board_id = resolve_board(connection, user)
+        owned_board(connection, board_id, user)
         return {"messages": recent_chat_messages(connection, user, board_id)}
 
 

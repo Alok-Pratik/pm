@@ -1,6 +1,8 @@
 import type { BoardData } from "@/lib/kanban";
 
 export const initialData: BoardData = {
+  id: "board-test",
+  title: "My board",
   columns: [
     { id: "col-backlog", title: "Backlog", cardIds: ["card-1", "card-2"] },
     { id: "col-discovery", title: "Discovery", cardIds: ["card-3"] },
