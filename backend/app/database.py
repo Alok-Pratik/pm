@@ -35,6 +35,17 @@ def connect() -> sqlite3.Connection:
     return connection
 
 
+def write_connect() -> sqlite3.Connection:
+    """Open a write transaction that locks the database before any read.
+
+    SQLite only applies the UNIQUE (column_id, position) constraint safely when
+    concurrent mutations are serialized; BEGIN IMMEDIATE acquires the writer lock
+    up front instead of racing read-then-write snapshots."""
+    connection = connect()
+    connection.execute("BEGIN IMMEDIATE")
+    return connection
+
+
 def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript("""
         CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE);
@@ -197,11 +208,17 @@ def recent_chat_messages(
 def apply_board_operations(connection: sqlite3.Connection, board_id: str, operations: list) -> None:
     for op in operations:
         if op.type == "rename_column":
+            title = op.title.strip()
+            if not title:
+                raise ValueError("rename_column: title cannot be empty")
             owned_column(connection, op.column_id, board_id)
             connection.execute(
-                "UPDATE columns SET title = ? WHERE id = ?", (op.title.strip(), op.column_id)
+                "UPDATE columns SET title = ? WHERE id = ?", (title, op.column_id)
             )
         elif op.type == "create_card":
+            title = op.title.strip()
+            if not title:
+                raise ValueError("create_card: title cannot be empty")
             owned_column(connection, op.column_id, board_id)
             position = connection.execute(
                 "SELECT COUNT(*) FROM cards WHERE column_id = ?", (op.column_id,)
@@ -209,7 +226,7 @@ def apply_board_operations(connection: sqlite3.Connection, board_id: str, operat
             card_id = f"card-ai-{os.urandom(8).hex()}"
             connection.execute(
                 "INSERT INTO cards (id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
-                (card_id, op.column_id, op.title.strip(), (op.details or "").strip(), position),
+                (card_id, op.column_id, title, (op.details or "").strip(), position),
             )
         elif op.type == "edit_card":
             card = owned_card(connection, op.card_id, board_id)

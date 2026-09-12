@@ -1,243 +1,188 @@
 # Code Review
 
-Full review of the codebase as of the completed MVP (all 10 parts done). Organised by severity. Each item includes the file/line and a concrete action.
+Full review of the codebase as of the completed MVP (all 10 parts done).
+Organised by severity. Each item lists the file/line and a concrete action.
 
----
+## Previous review status
+
+The earlier review's 20 findings were re-checked against the current code:
+
+- **Fixed:** stale card edit state, dirty cancel, orphaned optimistic chat
+  message, `rename_column` ownership, chat message length limit,
+  type-discriminated `BoardOperation` validation, proper AI message turns
+  instead of a JSON blob, stable `onUnauthorized` callback, column card
+  children no longer remount, 422 validation tests, DnD browser test,
+  component unit tests, and failed-login/session-expiry e2e tests.
+- **Still present (reassessed below):** the AI-call race window, duplicate
+  move-card logic, and schema init on every connection.
 
 ## Bugs
 
-### 1. `KanbanCard` edit state goes stale after external board update
-**File:** `frontend/src/components/KanbanCard.tsx:15-16`
+### 1. AI operations can persist blank column and card titles
+**File:** `backend/app/database.py:199-213`, `backend/app/ai.py:8-19`
 
-`title` and `details` are initialised once from props via `useState`. When the board is refreshed (after an AI operation or another user action), the `card` prop updates but the local state does not re-initialise. If the user then opens the edit form they see old values; submitting overwrites the server's version.
+`apply_board_operations` calls `op.title.strip()` for `rename_column` and
+`create_card` but never rejects an empty result, so the AI can save a blank
+column title or a blank card title. The interactive REST endpoints enforce a
+non-blank title (`main.py:133-136, 147-149`), so AI and manual flows behave
+differently.
 
-**Fix:** Sync state from the current prop when opening edit mode:
-```tsx
-onClick={() => { setTitle(card.title); setDetails(card.details); setIsEditing(true); }}
-```
+**Fix:** Add a non-blank-title check in `apply_board_operations` for
+`rename_column` and `create_card` (raise `ValueError` like `edit_card` does),
+or add `min_length=1` plus strip validation to the Pydantic models.
 
----
+### 2. Concurrent card creation can 500
+**File:** `backend/app/main.py:154-161`, `backend/app/database.py:206-213`
 
-### 2. Cancel button leaves dirty edit state
-**File:** `frontend/src/components/KanbanCard.tsx:49`
+New-card `position` is computed as `SELECT COUNT(*)` from the same column, then
+inserted against the `UNIQUE (column_id, position)` constraint. Two concurrent
+creates in the same column read the same count first; the loser either hits
+`IntegrityError` on insert or `database is locked`, surfacing as a 500.
 
-`onClick={() => setIsEditing(false)}` does not reset `title`/`details`. After typing and clicking Cancel, reopening the edit form shows whatever the user had typed, not the saved values.
+**Fix:** Serialize writes for the MVP (e.g., `BEGIN IMMEDIATE`, or retry on
+`IntegrityError`). Low likelihood for a single user, but the crash is not
+handled gracefully today.
 
-**Fix:** Reset state on cancel:
-```tsx
-onClick={() => { setTitle(card.title); setDetails(card.details); setIsEditing(false); }}
-```
+### 3. Arrow keys while editing a card can start a drag
+**File:** `frontend/src/components/KanbanCard.tsx:44-56`
 
----
+`useSortable` spreads its listeners (including keyboard activation) on the
+card `<article>`. The edit form stops `onPointerDown` propagation but not
+`keydown`, so pressing arrow keys inside the title/details inputs can trigger
+a dnd-kit keyboard drag mid-edit.
 
-### 3. Optimistic user message orphaned on chat error
-**File:** `frontend/src/components/ChatSidebar.tsx:31`
+**Fix:** Stop `keydown` propagation on the edit form (`onKeyDown={(e) => e.stopPropagation()}`).
 
-The user message is appended to the messages list before the API call. On failure, the error banner appears but the message stays with no assistant reply — a dangling half-conversation that persists for the session.
+### 4. Card editor closes even when the save request fails
+**File:** `frontend/src/components/KanbanCard.tsx:50-56`,
+`frontend/src/components/KanbanBoard.tsx:97-99`
 
-**Fix:** On catch, remove the last message before setting the error:
-```tsx
-setMessages((current) => current.slice(0, -1));
-setError(...);
-```
+The form calls `onEdit(...)` and immediately `setIsEditing(false)` while
+`handleEditCard` fires `apply(api.updateCard(...))` without awaiting it. If
+the request fails, the user's typed input is lost along with the error shown
+only at the board level.
 
----
+**Fix:** Pass the pending promise back and only close the editor on success
+(or keep the inputs populated so the user can retry).
 
-### 4. `rename_column` calls `get_board` without `user_id`
-**File:** `backend/app/main.py:107`
+## Minor issues
 
-```python
-return get_board(connection)   # defaults to user_id="user"
-```
+### 5. `/api/hello` is leftover scaffolding
+**File:** `backend/app/main.py:100-102`
 
-Every other mutating endpoint passes `user_id` explicitly. This silently serves the wrong board if a second user is ever added.
+Part-2 example endpoint still deployed. No caller exists.
 
-**Fix:** `return get_board(connection, signed_in_user(request))`
+**Fix:** Delete the route.
 
----
+### 6. `moveCard` and its helpers in `lib/kanban.ts` are dead code
+**File:** `frontend/src/lib/kanban.ts:21-106`
 
-### 5. Chat endpoint opens two separate DB connections with a race window
-**File:** `backend/app/main.py:176-197`
+`KanbanBoard` computes the target position inline (`KanbanBoard.tsx:80`) and
+updates solely from the backend-canonical board. `moveCard`, `isColumnId`, and
+`findColumnId` are exercised only by their unit test.
 
-The board is loaded on one connection (closed), the AI call is made, then a second connection applies operations. The AI's decisions are based on board state that is already stale by the time the second connection runs. For the current single-user MVP this is harmless, but it is structurally wrong.
+**Fix:** Remove them (and the test) or wire the UI through the helper so
+drag-move logic lives in one place.
 
-**Fix:** Acquire a single connection before the AI call, pass it to `get_board` and `recent_chat_messages`, keep it open across the AI call, then apply operations and save history on the same connection.
+### 7. Drag-and-drop can only insert a card before another card
+**File:** `frontend/src/components/KanbanBoard.tsx:80`
 
----
+Position is derived from `indexOf(overId)`, which always places the dropped
+card *before* the hovered card in another column; dropping after a card is
+never possible. Same-column drops happen to land after the target via the
+remove-then-insert order, so behaviour is inconsistent between columns.
 
-## Security
+**Fix:** Compute the insert index from the drop midpoint within the over target
+or document the "insert before" behaviour as intended.
 
-### 6. `SESSION_SECRET` falls back to a known string with no warning
-**File:** `backend/app/main.py:15`
+### 8. Session secret is a known constant in the container
+**File:** `backend/app/main.py:29,42-47`, `docker-compose.yml`
 
-```python
-secret_key=os.environ.get("SESSION_SECRET", "local-development-secret")
-```
+`SESSION_SECRET` is not passed through `docker-compose.yml`, so the container
+runs with the hardcoded `local-development-secret` while only logging a
+warning.
 
-A deployment that omits the env var silently uses a publicly-known signing key. Session cookies can be forged.
+**Fix:** Pass `SESSION_SECRET` from the root `.env` (optional) and document it,
+or accept the warning for a local-only MVP. The warning is good; the default
+should not be silent in the shipped image.
 
-**Fix:** Raise at startup if the key is absent (or is the default), or at minimum log a loud warning. Add `SESSION_SECRET` to the `.env` template with a generated value.
+### 9. Schema init runs the full DDL on every connection
+**File:** `backend/app/database.py:28-35, 38-66`
 
----
+`connect()` calls `initialize()` on every request, re-running
+`CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS`, which also performs
+an implicit `COMMIT` via `executescript`.
 
-### 7. No chat message length limit
-**File:** `backend/app/main.py:170-172`
+**Fix:** Keep as-is for MVP simplicity, or gate the DDL behind a single
+startup check (the `lifespan` handler already calls `initialize`).
 
-The only validation on `/api/chat` is that the message is non-empty. An arbitrarily long message is forwarded to OpenRouter, risking unexpected costs or upstream errors.
+### 10. Blocking SQLite work inside an async endpoint
+**File:** `backend/app/main.py:210-244`
 
-**Fix:** Add a max-length check (e.g. 2 000 characters) and return 422 if exceeded.
+`chat` is `async def` but performs synchronous `sqlite3` reads and writes
+inline, blocking the event loop while disk I/O happens.
 
----
+**Fix:** For MVP this is acceptable at single-user scale; if concurrent usage
+appears, move the DB work into a thread (`run_in_executor`) or make the route
+sync like the others.
 
-## Code Quality
+### 11. Seed data duplicated between frontend and backend
+**File:** `frontend/src/test/fixtures.ts`, `backend/app/database.py:16-25`
 
-### 8. Duplicate move-card logic
-**Files:** `backend/app/main.py:149-167` and `backend/app/database.py:180-196`
+The same five columns and eight cards exist in both places. Any seed change
+requires editing two files and can silently desynchronise tests.
 
-The position-rewrite logic (remove from source column, insert into target column, call `rewrite_positions`) is nearly identical in both `move_card` and `apply_board_operations`. A bug fix in one does not automatically fix the other — already diverged slightly in minor structure.
+**Fix:** Derive the frontend fixture from the backend's canonical `/api/board`
+response, or generate it from the same source of truth.
 
-**Fix:** Extract a `_move_card_in_db(connection, card_id, column_id, position, user_id)` helper in `database.py` and call it from both sites.
+### 12. OpenRouter request lacks `response_format` and `max_tokens`
+**File:** `backend/app/openrouter.py:20-29`
 
----
+No structured-output hint or token cap. Markdown-fenced model output (which the
+prompt already forbids) fails `parse_ai_response` and surfaces as an opaque 502
+to the user.
 
-### 9. `board_for_user` called 3-4 times per request
-**File:** `backend/app/database.py:69-79`
+**Fix:** Set `max_tokens` and, if the selected model supports it, pass a
+JSON-oriented `response_format`.
 
-Each call to `owned_card`, `owned_column`, and `get_board` calls `board_for_user`, which issues `INSERT OR IGNORE` for the user row and the board row. A move request triggers this 3-4 times per HTTP call.
+### 13. Chat history load swallows non-401 errors
+**File:** `frontend/src/components/ChatSidebar.tsx:18-22`
 
-**Fix:** Accept `board_id` as an optional parameter in `owned_card`/`owned_column`, or resolve the board once at the top of each endpoint and thread it through.
+Only `ApiError` with status 401 is handled; any other failure leaves the
+sidebar silently empty.
 
----
+**Fix:** Surface a readable error message on non-401 failures, matching the
+board's error handling.
 
-### 10. `BoardOperation` fields not validated per operation type
-**File:** `backend/app/ai.py:16-24`
+### 14. Rename input remounts after each saved rename
+**File:** `frontend/src/components/KanbanColumn.tsx:51`
 
-All fields except `type` are `Optional`. An AI response like `{"type": "rename_column"}` (missing `column_id` and `title`) passes Pydantic validation and only fails later inside `apply_board_operations`, mixing parsing and application concerns.
+`key={`${column.id}-${column.title}`}` recreates the input whenever the saved
+title changes, dropping focus after a rename commits.
 
-**Fix:** Use a discriminated union — one Pydantic model per operation type with its required fields marked non-optional. `AIResponse.operations` becomes `list[Annotated[RenameColumn | CreateCard | ..., Field(discriminator="type")]]`.
+**Fix:** Drop the `key` and rely on `useEffect` state sync, so focus survives.
 
----
+### 15. Docker reproducibility nits
+**File:** `Dockerfile:11,19-20`
 
-### 11. AI prompt encodes history as JSON, not as message turns
-**File:** `backend/app/ai.py:43-55`
+`ghcr.io/astral-sh/uv:latest` is unpinned, and `backend/uv.lock` is not copied
+into the build, so the Python layer re-resolves dependencies.
 
-The conversation history is packed into a JSON field inside a single user message rather than being sent as alternating `role`/`content` pairs in the `messages` array. LLMs are trained on proper turn-based conversation; embedding history as a JSON blob degrades instruction-following quality.
+**Fix:** Pin the uv image tag and `COPY backend/uv.lock ./` alongside
+`pyproject.toml`, then `uv sync --no-dev --locked`.
 
-**Fix:** Build `messages` as a list of `{"role": ..., "content": ...}` dicts — system instruction first, then the alternating history, then a final user message with the current board state appended.
+## Testing gaps
 
----
+- No backend test covers blank AI column/card titles — the gap that let bug
+  #1 through.
+- Playwright's "move between columns" tests call `/api/cards/{id}/move`
+  directly; only the within-column reorder exercises the real pointer drag.
+  A real cross-column drag test would cover bug #7-style behavior.
 
-### 12. `onUnauthorized` callback recreated each render causes spurious board re-fetch
-**Files:** `frontend/src/components/AuthGate.tsx:54`, `KanbanBoard.tsx:47`
+## Summary
 
-`AuthGate` passes `() => setIsAuthenticated(false)` inline. This creates a new function reference on every render. `KanbanBoard` lists `onUnauthorized` in its `useEffect` dependency array, so the board is re-fetched whenever `AuthGate` re-renders.
-
-**Fix:** Wrap in `useCallback` in `AuthGate`:
-```tsx
-const handleUnauthorized = useCallback(() => setIsAuthenticated(false), []);
-```
-
----
-
-### 13. `KanbanColumn` key forces full child remount on rename
-**File:** `frontend/src/components/KanbanBoard.tsx:171`
-
-```tsx
-key={`${column.id}-${column.title}`}
-```
-
-This remounts the entire column (including all cards) on every title change — done to reset the column's local `title` state. The column's input already has its own key (`frontend/src/components/KanbanColumn.tsx:47`) that resets just the input on prop change.
-
-**Fix:** Remove the `column.title` part from the column key; the input-level key is sufficient.
-
----
-
-### 14. `initialData` and `createId` are dead code in production
-**File:** `frontend/src/lib/kanban.ts:18, 164`
-
-`initialData` was used by the pre-backend demo. `createId` is not called anywhere in the current codebase. Both are exported and bundled into the static output.
-
-**Fix:** Delete both exports. Remove any test references to `initialData`.
-
----
-
-### 15. Schema initialisation runs on every DB connection
-**File:** `backend/app/database.py:34`
-
-`initialize(connection)` (which runs the full `CREATE TABLE IF NOT EXISTS` DDL block) is called inside `connect()`, so it runs on every request. This is safe but wasteful.
-
-**Fix:** Run `initialize` once at application startup using a FastAPI `lifespan` handler, then remove the call from `connect()`.
-
----
-
-## Test Coverage Gaps
-
-### 16. Drag-and-drop has no browser-level test
-**File:** `frontend/tests/kanban.spec.ts:27-47, 80-98`
-
-Both move tests bypass the UI entirely and call the API directly via `page.request.post`. The dnd-kit integration — sensors, overlay, collision detection, drop zones — is untested in the browser.
-
-**Action:** Add a Playwright test that performs an actual drag gesture using `page.dragAndDrop` or the pointer-event sequence and asserts the card appears in the target column in the DOM.
-
----
-
-### 17. No test for chat history limit
-**File:** `backend/tests/test_main.py`
-
-The 20-message bound in `recent_chat_messages` is not tested. Nor is the history hydration on the chat endpoint (that the `history` field in the prompt is bounded).
-
-**Action:** Add a test that posts 25 chat exchanges and asserts the prompt sent to OpenRouter contains at most 20 history entries.
-
----
-
-### 18. No test for 422 validation paths
-**File:** `backend/tests/test_main.py`
-
-Not tested: empty card title on create, empty card title on edit, empty column title on rename, negative move position, empty chat message.
-
-**Action:** Add one parametrised test covering each 422 case.
-
----
-
-### 19. No unit tests for `ChatSidebar`, `AuthGate`, or `KanbanCard`
-**File:** `frontend/src/components/`
-
-The three most interactive components — the ones containing the bugs described above — have zero unit test coverage.
-
-**Action:** Add Vitest + Testing Library tests for at minimum: `KanbanCard` (edit opens with current values, cancel resets, save calls onEdit), `ChatSidebar` (optimistic message, error removes message), `AuthGate` (shows login, success shows board, logout clears state).
-
----
-
-### 20. No e2e test for failed login or session expiry
-**File:** `frontend/tests/kanban.spec.ts`
-
-Wrong credentials and the `onUnauthorized` re-auth flow have no browser coverage.
-
-**Action:** Add tests for: invalid credentials show error message; accessing board after session expires redirects to login.
-
----
-
-## Summary Table
-
-| # | Severity | Area | One-line description |
-|---|----------|------|----------------------|
-| 1 | Bug | Frontend | Card edit form shows stale values after board update |
-| 2 | Bug | Frontend | Cancel button leaves dirty edit state |
-| 3 | Bug | Frontend | Orphaned optimistic message on chat error |
-| 4 | Bug | Backend | `rename_column` passes no `user_id` to `get_board` |
-| 5 | Bug | Backend | Two DB connections around AI call create race window |
-| 6 | Security | Backend | `SESSION_SECRET` falls back to a known string silently |
-| 7 | Security | Backend | No chat message length limit |
-| 8 | Quality | Backend | Duplicate move-card logic in two places |
-| 9 | Quality | Backend | `board_for_user` called 3-4× per request |
-| 10 | Quality | Backend | `BoardOperation` validated per-field, not per-type |
-| 11 | Quality | Backend | AI history sent as JSON blob, not message turns |
-| 12 | Quality | Frontend | Inline `onUnauthorized` causes spurious board re-fetch |
-| 13 | Quality | Frontend | Column key on title remounts all card children |
-| 14 | Quality | Frontend | `initialData` and `createId` are dead code |
-| 15 | Quality | Backend | DB schema init runs on every connection |
-| 16 | Tests | Frontend | Drag-and-drop not tested in browser |
-| 17 | Tests | Backend | Chat history 20-message limit untested |
-| 18 | Tests | Backend | No 422 validation path tests |
-| 19 | Tests | Frontend | `ChatSidebar`, `AuthGate`, `KanbanCard` have no unit tests |
-| 20 | Tests | Frontend | No e2e test for failed login or session expiry |
+The implementation is solid: atomic AI operations, canonical board responses,
+ownership-verified SQL, proper Pydantic/discriminated-union validation, and
+meaningful unit, integration, and browser coverage. The remaining issues are
+mostly low-severity robustness and UX items; the two worth fixing soon are the
+AI blank-title validation gap (#1) and the card-save/error handling (#4).
